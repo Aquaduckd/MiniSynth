@@ -818,7 +818,7 @@ function detectChordName(notes: Iterable<number>): string {
   }
 
   if (!best) {
-    return pitchClasses.map(pitchClassName).join(" ");
+    return "Unknown";
   }
 
   return `${pitchClassName(best.root)}${best.suffix}`;
