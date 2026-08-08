@@ -2923,6 +2923,7 @@ export class SynthApp {
   private masterCanvas: HTMLCanvasElement | null = null;
   private activeOscTab: OscId = 0;
   private oscTabButtons = new Map<OscId, HTMLButtonElement>();
+  private oscTabDots = new Map<OscId, HTMLElement>();
   private oscTabPanels = new Map<OscId, HTMLElement>();
   private oscWaveformButtons: Array<Map<OscWaveform, HTMLButtonElement>> = [
     new Map(),
@@ -2934,6 +2935,7 @@ export class SynthApp {
   private randomModeButtons = new Map<RandomMode, HTMLButtonElement>();
   private activePitchModTab: PitchModTab = "vibrato";
   private pitchModTabButtons = new Map<PitchModTab, HTMLButtonElement>();
+  private pitchModTabDots = new Map<PitchModTab, HTMLElement>();
   private pitchModTabPanels = new Map<PitchModTab, HTMLElement>();
   private paramKnobs = new Map<string, RotaryKnobHandle>();
   private effectKnobs = new Map<keyof EffectsParams, RotaryKnobHandle>();
@@ -3124,6 +3126,7 @@ export class SynthApp {
     this.vibratoCanvas = null;
     this.masterCanvas = null;
     this.oscTabButtons.clear();
+    this.oscTabDots.clear();
     this.oscTabPanels.clear();
     for (const buttons of this.oscWaveformButtons) {
       buttons.clear();
@@ -3132,6 +3135,7 @@ export class SynthApp {
     this.vibratoButtons.clear();
     this.randomModeButtons.clear();
     this.pitchModTabButtons.clear();
+    this.pitchModTabDots.clear();
     this.pitchModTabPanels.clear();
     this.paramKnobs.clear();
     this.effectKnobs.clear();
@@ -3488,22 +3492,18 @@ export class SynthApp {
     tabs.setAttribute("aria-label", "Oscillator");
 
     for (let osc = 0; osc < OSC_COUNT; osc += 1) {
-      const tab = document.createElement("button");
-      tab.type = "button";
-      tab.setAttribute("role", "tab");
-      tab.dataset.oscTab = String(osc);
-      tab.textContent = `Osc ${osc + 1}`;
-      tab.className =
-        "rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors";
-      tab.addEventListener(
+      const { button, dot } = this.createTabButton(`Osc ${osc + 1}`);
+      button.dataset.oscTab = String(osc);
+      button.addEventListener(
         "click",
         () => {
           this.setActiveOscTab(osc as OscId);
         },
         { signal: this.abort.signal },
       );
-      this.oscTabButtons.set(osc as OscId, tab);
-      tabs.append(tab);
+      this.oscTabButtons.set(osc as OscId, button);
+      this.oscTabDots.set(osc as OscId, dot);
+      tabs.append(button);
     }
 
     heading.append(title, tabs);
@@ -3527,6 +3527,7 @@ export class SynthApp {
     );
 
     this.setActiveOscTab(this.activeOscTab);
+    this.updateTabActivityIndicators();
     return panel;
   }
 
@@ -3587,25 +3588,20 @@ export class SynthApp {
     const theme = SECTION_THEMES.oscillator;
 
     for (const [id, button] of this.oscTabButtons) {
-      const active = id === osc;
-      button.setAttribute("aria-selected", active ? "true" : "false");
-      if (active) {
+      const selected = id === osc;
+      button.setAttribute("aria-selected", selected ? "true" : "false");
+      if (selected) {
+        button.className =
+          "inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors";
         button.style.borderColor = `${theme.accent}99`;
         button.style.backgroundColor = theme.accentFill;
         button.style.color = theme.accentBright;
       } else {
+        button.className =
+          "inline-flex items-center gap-1.5 rounded-md border border-slate-700 bg-slate-900/60 px-2 py-0.5 text-[11px] font-medium text-slate-400 transition-colors hover:border-slate-600 hover:text-slate-200";
         button.style.borderColor = "";
         button.style.backgroundColor = "";
         button.style.color = "";
-        button.className =
-          "rounded-md border border-slate-700 bg-slate-900/60 px-2 py-0.5 text-[11px] font-medium text-slate-400 transition-colors hover:border-slate-600 hover:text-slate-200";
-      }
-      if (active) {
-        button.className =
-          "rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors";
-        button.style.borderColor = `${theme.accent}99`;
-        button.style.backgroundColor = theme.accentFill;
-        button.style.color = theme.accentBright;
       }
     }
 
@@ -3704,21 +3700,19 @@ export class SynthApp {
     tabs.setAttribute("aria-label", "Pitch modulation");
 
     for (const tabId of ["vibrato", "random"] as PitchModTab[]) {
-      const tab = document.createElement("button");
-      tab.type = "button";
-      tab.setAttribute("role", "tab");
-      tab.textContent = tabId === "vibrato" ? "Vibrato" : "Random";
-      tab.className =
-        "rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors";
-      tab.addEventListener(
+      const { button, dot } = this.createTabButton(
+        tabId === "vibrato" ? "Vibrato" : "Random",
+      );
+      button.addEventListener(
         "click",
         () => {
           this.setActivePitchModTab(tabId);
         },
         { signal: this.abort.signal },
       );
-      this.pitchModTabButtons.set(tabId, tab);
-      tabs.append(tab);
+      this.pitchModTabButtons.set(tabId, button);
+      this.pitchModTabDots.set(tabId, dot);
+      tabs.append(button);
     }
 
     heading.append(title, tabs);
@@ -3739,6 +3733,7 @@ export class SynthApp {
     this.setActivePitchModTab(this.activePitchModTab);
     this.updateVibratoWaveformButtons();
     this.updateRandomModeButtons();
+    this.updateTabActivityIndicators();
     return section;
   }
 
@@ -3870,17 +3865,17 @@ export class SynthApp {
     const theme = SECTION_THEMES.vibrato;
 
     for (const [id, button] of this.pitchModTabButtons) {
-      const active = id === tab;
-      button.setAttribute("aria-selected", active ? "true" : "false");
-      if (active) {
+      const selected = id === tab;
+      button.setAttribute("aria-selected", selected ? "true" : "false");
+      if (selected) {
         button.className =
-          "rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors";
+          "inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors";
         button.style.borderColor = `${theme.accent}99`;
         button.style.backgroundColor = theme.accentFill;
         button.style.color = theme.accentBright;
       } else {
         button.className =
-          "rounded-md border border-slate-700 bg-slate-900/60 px-2 py-0.5 text-[11px] font-medium text-slate-400 transition-colors hover:border-slate-600 hover:text-slate-200";
+          "inline-flex items-center gap-1.5 rounded-md border border-slate-700 bg-slate-900/60 px-2 py-0.5 text-[11px] font-medium text-slate-400 transition-colors hover:border-slate-600 hover:text-slate-200";
         button.style.borderColor = "";
         button.style.backgroundColor = "";
         button.style.color = "";
@@ -4148,6 +4143,7 @@ export class SynthApp {
       onChange: (value) => {
         this.params.oscLevels[osc] = value;
         this.synth.setParams(this.params);
+        this.updateTabActivityIndicators();
         this.updateVisualizations();
       },
     });
@@ -4216,6 +4212,7 @@ export class SynthApp {
         }
         this.params = { ...this.params, vibratoAmount: snapped };
         this.synth.setParams(this.params);
+        this.updateTabActivityIndicators();
         this.updateVisualizations();
       },
     });
@@ -4240,12 +4237,54 @@ export class SynthApp {
         }
         this.params = { ...this.params, randomAmount: snapped };
         this.synth.setParams(this.params);
+        this.updateTabActivityIndicators();
         this.updateVisualizations();
       },
     });
 
     this.paramKnobs.set("randomAmount", knob);
     return knob.element;
+  }
+
+  private createTabButton(label: string): {
+    button: HTMLButtonElement;
+    dot: HTMLElement;
+  } {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.setAttribute("role", "tab");
+    button.className =
+      "inline-flex items-center gap-1.5 rounded-md border border-slate-700 bg-slate-900/60 px-2 py-0.5 text-[11px] font-medium text-slate-400 transition-colors hover:border-slate-600 hover:text-slate-200";
+
+    const dot = document.createElement("span");
+    dot.className = "h-1.5 w-1.5 shrink-0 rounded-full bg-slate-600";
+    dot.setAttribute("aria-hidden", "true");
+
+    const text = document.createElement("span");
+    text.textContent = label;
+
+    button.append(dot, text);
+    return { button, dot };
+  }
+
+  private updateTabActivityIndicators(): void {
+    for (const [osc, dot] of this.oscTabDots) {
+      const active = this.params.oscLevels[osc] > 0;
+      dot.className = active
+        ? "h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400"
+        : "h-1.5 w-1.5 shrink-0 rounded-full bg-slate-600";
+    }
+
+    for (const [tab, dot] of this.pitchModTabDots) {
+      const depth =
+        tab === "vibrato"
+          ? this.params.vibratoAmount
+          : this.params.randomAmount;
+      const active = vibratoDepthCents(depth) > 0;
+      dot.className = active
+        ? "h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400"
+        : "h-1.5 w-1.5 shrink-0 rounded-full bg-slate-600";
+    }
   }
 
   private createParamKnob(
@@ -4341,6 +4380,7 @@ export class SynthApp {
     this.updateOscWaveformButtons();
     this.updateVibratoWaveformButtons();
     this.updateRandomModeButtons();
+    this.updateTabActivityIndicators();
     this.updateWidthKnobVisibility();
     this.updateVisualizations();
   }
