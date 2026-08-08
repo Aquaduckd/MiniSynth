@@ -28,16 +28,20 @@ const MAX_CUTOFF_HZ = 20000;
 const MIN_FILTER_Q = 0.5;
 const MAX_FILTER_Q = 4;
 
-type Osc1Waveform = "pulse" | "saw";
-type Osc2Waveform = "triangle" | "sine";
+type OscWaveform = "pulse" | "saw" | "triangle" | "sine";
+type OscId = 0 | 1 | 2;
 type VibratoWaveform = "triangle" | "square";
 
+const OSC_COUNT = 3;
+
+type OscWaveformTuple = [OscWaveform, OscWaveform, OscWaveform];
+type OscNumberTuple = [number, number, number];
+
 interface SynthParams {
-  osc1Waveform: Osc1Waveform;
-  osc2Waveform: Osc2Waveform;
-  oscMix: number;
-  pulseWidth: number;
-  osc2Pitch: number;
+  oscWaveforms: OscWaveformTuple;
+  oscLevels: OscNumberTuple;
+  oscPitches: OscNumberTuple;
+  oscPulseWidths: OscNumberTuple;
   attack: number;
   decay: number;
   sustain: number;
@@ -74,10 +78,8 @@ interface KeyLayout {
 }
 
 interface ActiveVoice {
-  osc1Osc: OscillatorNode;
-  osc2Osc: OscillatorNode;
-  osc1Gain: GainNode;
-  osc2Gain: GainNode;
+  oscillators: OscillatorNode[];
+  oscGains: GainNode[];
   mixGain: GainNode;
   filter1: BiquadFilterNode;
   filter2: BiquadFilterNode;
@@ -95,12 +97,21 @@ interface PlotPadding {
   left: number;
 }
 
+function cloneParams(params: SynthParams): SynthParams {
+  return {
+    ...params,
+    oscWaveforms: [...params.oscWaveforms] as OscWaveformTuple,
+    oscLevels: [...params.oscLevels] as OscNumberTuple,
+    oscPitches: [...params.oscPitches] as OscNumberTuple,
+    oscPulseWidths: [...params.oscPulseWidths] as OscNumberTuple,
+  };
+}
+
 const DEFAULT_PARAMS: SynthParams = {
-  osc1Waveform: "pulse",
-  osc2Waveform: "triangle",
-  oscMix: 0,
-  pulseWidth: 1,
-  osc2Pitch: 0.5,
+  oscWaveforms: ["pulse", "triangle", "saw"],
+  oscLevels: [1, 0, 0],
+  oscPitches: [0.5, 0.5, 0.5],
+  oscPulseWidths: [1, 1, 1],
   attack: 0.01,
   decay: 0.12,
   sustain: 0.55,
@@ -116,7 +127,7 @@ const DEFAULT_PARAMS: SynthParams = {
   vibratoWaveform: "triangle",
 };
 
-const MASTER_GAIN = 0.22;
+const MASTER_GAIN = 0.7;
 
 const DEFAULT_EFFECTS: EffectsParams = {
   delayTime: 0.35,
@@ -217,12 +228,9 @@ const SECTION_THEMES: Record<SectionColor, PanelTheme> = {
   },
 };
 
-const OSC1_OPTIONS: { value: Osc1Waveform; label: string }[] = [
+const OSC_WAVEFORM_OPTIONS: { value: OscWaveform; label: string }[] = [
   { value: "pulse", label: "Pulse" },
   { value: "saw", label: "Saw" },
-];
-
-const OSC2_OPTIONS: { value: Osc2Waveform; label: string }[] = [
   { value: "triangle", label: "Triangle" },
   { value: "sine", label: "Sine" },
 ];
@@ -324,7 +332,7 @@ function sweepSeconds(speed: number): number {
 }
 
 function pitchPeakHz(baseHz: number, pitchKnob: number): number {
-  const cents = osc2PitchKnobToCents(pitchKnob);
+  const cents = oscPitchKnobToCents(pitchKnob);
   if (cents === 0) {
     return baseHz;
   }
@@ -333,23 +341,23 @@ function pitchPeakHz(baseHz: number, pitchKnob: number): number {
   return Math.max(20, peak);
 }
 
-function osc2TunedFrequency(baseHz: number, pitchKnob: number): number {
-  const cents = osc2PitchKnobToCents(pitchKnob);
+function oscTunedFrequency(baseHz: number, pitchKnob: number): number {
+  const cents = oscPitchKnobToCents(pitchKnob);
   return baseHz * 2 ** (cents / 1200);
 }
 
-function osc2PitchNegativeEnd(): number {
+function oscPitchNegativeEnd(): number {
   return OSC2_PITCH_NEGATIVE_SECTION;
 }
 
-function osc2PitchCentsEnd(): number {
+function oscPitchCentsEnd(): number {
   return OSC2_PITCH_NEGATIVE_SECTION + OSC2_PITCH_CENTS_SECTION;
 }
 
-function osc2PitchKnobToCents(knob: number): number {
-  const t = snapOsc2PitchKnob(knob);
-  const negativeEnd = osc2PitchNegativeEnd();
-  const centsEnd = osc2PitchCentsEnd();
+function oscPitchKnobToCents(knob: number): number {
+  const t = snapOscPitchKnob(knob);
+  const negativeEnd = oscPitchNegativeEnd();
+  const centsEnd = oscPitchCentsEnd();
 
   if (t <= negativeEnd) {
     const progress = t / negativeEnd;
@@ -369,10 +377,10 @@ function osc2PitchKnobToCents(knob: number): number {
   return (index + 1) * 100;
 }
 
-function snapOsc2PitchKnob(knob: number): number {
+function snapOscPitchKnob(knob: number): number {
   const t = Math.min(1, Math.max(0, knob));
-  const negativeEnd = osc2PitchNegativeEnd();
-  const centsEnd = osc2PitchCentsEnd();
+  const negativeEnd = oscPitchNegativeEnd();
+  const centsEnd = oscPitchCentsEnd();
 
   if (t <= negativeEnd) {
     const progress = t / negativeEnd;
@@ -402,8 +410,8 @@ function snapOsc2PitchKnob(knob: number): number {
     + (index / (OSC2_PITCH_SEMITONE_EXTENT - 1)) * OSC2_PITCH_POSITIVE_SECTION;
 }
 
-function formatOsc2Pitch(knob: number): string {
-  const cents = osc2PitchKnobToCents(knob);
+function formatOscPitch(knob: number): string {
+  const cents = oscPitchKnobToCents(knob);
   if (cents === 0) {
     return "0¢";
   }
@@ -534,12 +542,15 @@ function mixedOscAtTime(
   params: SynthParams,
   baseFrequency: number,
 ): number {
-  const osc1Phase = (time * baseFrequency) % 1;
-  const osc2Frequency = osc2TunedFrequency(baseFrequency, params.osc2Pitch);
-  const osc2Phase = (time * osc2Frequency) % 1;
-  const osc1 = osc1Sample(osc1Phase, params.osc1Waveform, params.pulseWidth);
-  const osc2 = osc2Sample(osc2Phase, params.osc2Waveform);
-  return osc1 * (1 - params.oscMix) + osc2 * params.oscMix;
+  let mix = 0;
+  for (let osc = 0; osc < OSC_COUNT; osc += 1) {
+    const frequency = oscTunedFrequency(baseFrequency, params.oscPitches[osc]);
+    const phase = (time * frequency) % 1;
+    mix +=
+      oscSample(phase, params.oscWaveforms[osc], params.oscPulseWidths[osc])
+      * params.oscLevels[osc];
+  }
+  return mix;
 }
 
 interface BiquadCoeffs {
@@ -816,28 +827,26 @@ function pulseWidthLabel(width: number): string {
   return `${Math.round(width * 50)}%`;
 }
 
-function osc1Sample(
+function oscSample(
   phase: number,
-  waveform: Osc1Waveform,
+  waveform: OscWaveform,
   pulseWidth: number,
 ): number {
-  if (waveform === "pulse") {
-    return pulseSample(phase, pulseWidthToDuty(pulseWidth));
+  switch (waveform) {
+    case "pulse":
+      return pulseSample(phase, pulseWidthToDuty(pulseWidth));
+    case "saw":
+      return 2 * phase - 1;
+    case "sine":
+      return Math.sin(phase * Math.PI * 2);
+    case "triangle":
+      return phase < 0.5 ? 4 * phase - 1 : 3 - 4 * phase;
   }
-  return 2 * phase - 1;
 }
 
-function osc2Sample(phase: number, waveform: Osc2Waveform): number {
-  if (waveform === "sine") {
-    return Math.sin(phase * Math.PI * 2);
-  }
-  return phase < 0.5 ? 4 * phase - 1 : 3 - 4 * phase;
-}
-
-function oscWaveformLabel(waveform: Osc1Waveform | Osc2Waveform): string {
+function oscWaveformLabel(waveform: OscWaveform): string {
   return (
-    OSC1_OPTIONS.find((option) => option.value === waveform)?.label
-    ?? OSC2_OPTIONS.find((option) => option.value === waveform)?.label
+    OSC_WAVEFORM_OPTIONS.find((option) => option.value === waveform)?.label
     ?? waveform
   );
 }
@@ -973,6 +982,7 @@ function drawWaveformPreview(
   canvas: HTMLCanvasElement,
   params: SynthParams,
   theme: PanelTheme,
+  osc: OscId,
 ): void {
   const setup = setupCanvas(canvas);
   if (!setup) {
@@ -994,75 +1004,40 @@ function drawWaveformPreview(
   ctx.lineTo(width - pad.right, midY);
   ctx.stroke();
 
+  const waveform = params.oscWaveforms[osc];
+  const pulseWidth = params.oscPulseWidths[osc];
+  const level = params.oscLevels[osc];
   const samples = Math.max(120, Math.floor(plotW));
-  const osc1Points: { x: number; y: number }[] = [];
-  const osc2Points: { x: number; y: number }[] = [];
-  const mixPoints: { x: number; y: number }[] = [];
-
-  for (let index = 0; index <= samples; index += 1) {
-    const phase = index / samples;
-    const osc1 = osc1Sample(phase, params.osc1Waveform, params.pulseWidth);
-    const osc2 = osc2Sample(phase, params.osc2Waveform);
-    const mixed = osc1 * (1 - params.oscMix) + osc2 * params.oscMix;
-    const x = pad.left + (index / samples) * plotW;
-
-    osc1Points.push({
-      x,
-      y: midY - osc1 * (plotH / 2 - 4),
-    });
-    osc2Points.push({
-      x,
-      y: midY - osc2 * (plotH / 2 - 4),
-    });
-    mixPoints.push({
-      x,
-      y: midY - mixed * (plotH / 2 - 4),
-    });
-  }
-
-  ctx.strokeStyle = "#64748b";
-  ctx.lineWidth = 1.5;
-  for (const points of [osc1Points, osc2Points]) {
-    ctx.beginPath();
-    for (let index = 0; index < points.length; index += 1) {
-      const point = points[index];
-      if (index === 0) {
-        ctx.moveTo(point.x, point.y);
-      } else {
-        ctx.lineTo(point.x, point.y);
-      }
-    }
-    ctx.stroke();
-  }
 
   ctx.strokeStyle = theme.accent;
   ctx.lineWidth = 2;
   ctx.beginPath();
-  for (let index = 0; index < mixPoints.length; index += 1) {
-    const point = mixPoints[index];
+  for (let index = 0; index <= samples; index += 1) {
+    const phase = index / samples;
+    const sample = oscSample(phase, waveform, pulseWidth);
+    const x = pad.left + (index / samples) * plotW;
+    const y = midY - sample * (plotH / 2 - 4);
     if (index === 0) {
-      ctx.moveTo(point.x, point.y);
+      ctx.moveTo(x, y);
     } else {
-      ctx.lineTo(point.x, point.y);
+      ctx.lineTo(x, y);
     }
   }
   ctx.stroke();
 
   ctx.fillStyle = "#64748b";
   ctx.font = "500 10px system-ui, sans-serif";
-  ctx.fillText(
-    `${oscWaveformLabel(params.osc1Waveform)} + ${oscWaveformLabel(params.osc2Waveform)}`,
-    pad.left,
-    12,
-  );
+  ctx.fillText(`Osc ${osc + 1}`, pad.left, 12);
   ctx.fillStyle = theme.accent;
-  ctx.fillText("Mix", pad.left + 120, 12);
+  ctx.fillText(oscWaveformLabel(waveform), pad.left + 48, 12);
   ctx.fillStyle = "#475569";
   ctx.font = "500 9px ui-monospace, monospace";
   ctx.textAlign = "right";
-  if (params.osc1Waveform === "pulse") {
-    ctx.fillText(`${pulseWidthLabel(params.pulseWidth)} width`, width - pad.right, 12);
-  }
+  const details =
+    waveform === "pulse"
+      ? `${pulseWidthLabel(pulseWidth)} · ${Math.round(level * 100)}%`
+      : `${Math.round(level * 100)}%`;
+  ctx.fillText(details, width - pad.right, 12);
   ctx.textAlign = "start";
 }
 
@@ -1386,8 +1361,8 @@ class SimpleSynth {
   private readonly pendingStarts = new Set<number>();
   private readonly pulseReal = new Float32Array(HARMONICS);
   private readonly pulseImag = new Float32Array(HARMONICS);
-  private pulseWave: PeriodicWave | null = null;
-  private params: SynthParams = { ...DEFAULT_PARAMS };
+  private readonly pulseWaves: Array<PeriodicWave | null> = [null, null, null];
+  private params: SynthParams = cloneParams(DEFAULT_PARAMS);
   private effectsParams: EffectsParams = { ...DEFAULT_EFFECTS };
   private previewChangeHandler: (() => void) | null = null;
   private lastPlayedNote: number | null = null;
@@ -1427,40 +1402,60 @@ class SimpleSynth {
   }
 
   setParams(params: SynthParams): void {
-    const osc1ConfigChanged =
-      params.osc1Waveform !== this.params.osc1Waveform
-      || (params.osc1Waveform === "pulse"
-        && params.pulseWidth !== this.params.pulseWidth);
-    const osc2ConfigChanged =
-      params.osc2Waveform !== this.params.osc2Waveform;
-    const mixChanged = params.oscMix !== this.params.oscMix;
-    const osc2PitchChanged = params.osc2Pitch !== this.params.osc2Pitch;
+    const previous = this.params;
+    const configChanged = Array.from({ length: OSC_COUNT }, (_, osc) => {
+      return (
+        params.oscWaveforms[osc] !== previous.oscWaveforms[osc]
+        || (params.oscWaveforms[osc] === "pulse"
+          && params.oscPulseWidths[osc] !== previous.oscPulseWidths[osc])
+      );
+    });
+    const pitchChangedFlags = Array.from({ length: OSC_COUNT }, (_, osc) => {
+      return params.oscPitches[osc] !== previous.oscPitches[osc];
+    });
+    const mixChanged = params.oscLevels.some(
+      (level, osc) => level !== previous.oscLevels[osc],
+    );
     const filterChanged =
-      params.filterInitial !== this.params.filterInitial
-      || params.filterFinal !== this.params.filterFinal
-      || params.filterSpeed !== this.params.filterSpeed
-      || params.filterResonance !== this.params.filterResonance;
+      params.filterInitial !== previous.filterInitial
+      || params.filterFinal !== previous.filterFinal
+      || params.filterSpeed !== previous.filterSpeed
+      || params.filterResonance !== previous.filterResonance;
     const vibratoChanged =
-      params.vibratoRate !== this.params.vibratoRate
-      || params.vibratoDelay !== this.params.vibratoDelay
-      || params.vibratoRamp !== this.params.vibratoRamp
-      || params.vibratoAmount !== this.params.vibratoAmount
-      || params.vibratoWaveform !== this.params.vibratoWaveform;
+      params.vibratoRate !== previous.vibratoRate
+      || params.vibratoDelay !== previous.vibratoDelay
+      || params.vibratoRamp !== previous.vibratoRamp
+      || params.vibratoAmount !== previous.vibratoAmount
+      || params.vibratoWaveform !== previous.vibratoWaveform;
     const vibratoWaveformChanged =
-      params.vibratoWaveform !== this.params.vibratoWaveform;
+      params.vibratoWaveform !== previous.vibratoWaveform;
 
-    this.params = params;
+    this.params = cloneParams(params);
 
-    if (osc1ConfigChanged && this.params.osc1Waveform === "pulse") {
-      this.updatePulseWave();
+    for (let osc = 0; osc < OSC_COUNT; osc += 1) {
+      if (configChanged[osc] && this.params.oscWaveforms[osc] === "pulse") {
+        this.updatePulseWave(osc as OscId);
+      }
     }
 
     for (const voice of this.voices.values()) {
       if (mixChanged) {
         this.applyMixLevels(voice);
       }
-      if (osc2PitchChanged && this.context) {
-        this.applyOsc2Pitch(voice, this.context.currentTime);
+      if (this.context) {
+        const when = this.context.currentTime;
+        for (let osc = 0; osc < OSC_COUNT; osc += 1) {
+          if (pitchChangedFlags[osc]) {
+            this.applyOscPitch(voice, osc as OscId, when);
+          }
+          if (configChanged[osc]) {
+            this.configureOscillator(
+              voice.oscillators[osc],
+              osc as OscId,
+              this.context,
+            );
+          }
+        }
       }
       if (filterChanged) {
         this.applyFilter(voice);
@@ -1470,14 +1465,6 @@ class SimpleSynth {
       }
       if (vibratoWaveformChanged && this.context) {
         this.configureVibratoOsc(voice.vibratoOsc);
-      }
-      if (this.context) {
-        if (osc1ConfigChanged) {
-          this.configureOsc1(voice.osc1Osc, this.context);
-        }
-        if (osc2ConfigChanged) {
-          this.configureOsc2(voice.osc2Osc);
-        }
       }
     }
   }
@@ -1662,7 +1649,9 @@ class SimpleSynth {
       this.output = this.context.createGain();
       this.output.gain.value = 1;
       this.initEffectsChain(this.context);
-      this.updatePulseWave();
+      for (let osc = 0; osc < OSC_COUNT; osc += 1) {
+        this.updatePulseWave(osc as OscId);
+      }
     }
 
     if (this.context.state === "suspended") {
@@ -1784,7 +1773,7 @@ class SimpleSynth {
     this.reverbWet = null;
     this.masterGain = null;
     this.effectsReady = false;
-    this.pulseWave = null;
+    this.pulseWaves.fill(null);
   }
 
   private async startNote(note: number): Promise<void> {
@@ -1809,23 +1798,8 @@ class SimpleSynth {
       const envelope = context.createGain();
       envelope.gain.setValueAtTime(0, now);
 
-      const osc2BaseFrequency = osc2TunedFrequency(
-        baseFrequency,
-        this.params.osc2Pitch,
-      );
-
-      const osc1Osc = context.createOscillator();
-      this.configureOsc1(osc1Osc, context);
-      osc1Osc.frequency.setValueAtTime(baseFrequency, now);
-
-      const osc2Osc = context.createOscillator();
-      this.configureOsc2(osc2Osc);
-      osc2Osc.frequency.setValueAtTime(osc2BaseFrequency, now);
-      this.schedulePitchContour(osc1Osc, baseFrequency, now);
-      this.schedulePitchContour(osc2Osc, osc2BaseFrequency, now);
-
-      const osc1Gain = context.createGain();
-      const osc2Gain = context.createGain();
+      const oscillators: OscillatorNode[] = [];
+      const oscGains: GainNode[] = [];
       const mixGain = context.createGain();
       const filter1 = context.createBiquadFilter();
       const filter2 = context.createBiquadFilter();
@@ -1843,24 +1817,34 @@ class SimpleSynth {
       const vibratoGain = context.createGain();
       vibratoGain.gain.setValueAtTime(0, now);
 
-      osc1Osc.connect(osc1Gain);
-      osc2Osc.connect(osc2Gain);
-      osc1Gain.connect(mixGain);
-      osc2Gain.connect(mixGain);
+      for (let osc = 0; osc < OSC_COUNT; osc += 1) {
+        const oscFrequency = oscTunedFrequency(
+          baseFrequency,
+          this.params.oscPitches[osc],
+        );
+        const oscillator = context.createOscillator();
+        this.configureOscillator(oscillator, osc as OscId, context);
+        oscillator.frequency.setValueAtTime(oscFrequency, now);
+        this.schedulePitchContour(oscillator, oscFrequency, now);
+
+        const oscGain = context.createGain();
+        oscillator.connect(oscGain);
+        oscGain.connect(mixGain);
+        vibratoGain.connect(oscillator.frequency);
+
+        oscillators.push(oscillator);
+        oscGains.push(oscGain);
+      }
+
       mixGain.connect(filter1);
       filter1.connect(filter2);
       filter2.connect(envelope);
       envelope.connect(this.output);
-
       vibratoOsc.connect(vibratoGain);
-      vibratoGain.connect(osc1Osc.frequency);
-      vibratoGain.connect(osc2Osc.frequency);
 
       const voice: ActiveVoice = {
-        osc1Osc,
-        osc2Osc,
-        osc1Gain,
-        osc2Gain,
+        oscillators,
+        oscGains,
         mixGain,
         filter1,
         filter2,
@@ -1880,8 +1864,9 @@ class SimpleSynth {
       this.scheduleAttack(envelope, now);
       this.applyVibrato(voice);
 
-      osc1Osc.start(now);
-      osc2Osc.start(now);
+      for (const oscillator of oscillators) {
+        oscillator.start(now);
+      }
       vibratoOsc.start(now);
       this.voices.set(note, voice);
       if (note === this.lastPlayedNote) {
@@ -1896,10 +1881,10 @@ class SimpleSynth {
   private discardVoice(voice: ActiveVoice): void {
     voice.vibratoGain.disconnect();
     voice.vibratoOsc.disconnect();
-    voice.osc1Osc.disconnect();
-    voice.osc2Osc.disconnect();
-    voice.osc1Gain.disconnect();
-    voice.osc2Gain.disconnect();
+    for (let osc = 0; osc < OSC_COUNT; osc += 1) {
+      voice.oscillators[osc].disconnect();
+      voice.oscGains[osc].disconnect();
+    }
     voice.mixGain.disconnect();
     voice.filter1.disconnect();
     voice.filter2.disconnect();
@@ -1924,8 +1909,9 @@ class SimpleSynth {
     voice.envelope.gain.linearRampToValueAtTime(0, releaseEnd);
 
     const stopAt = releaseEnd + 0.05;
-    voice.osc1Osc.stop(stopAt);
-    voice.osc2Osc.stop(stopAt);
+    for (const oscillator of voice.oscillators) {
+      oscillator.stop(stopAt);
+    }
     voice.vibratoOsc.stop(stopAt);
   }
 
@@ -1939,14 +1925,18 @@ class SimpleSynth {
   }
 
   private applyMixLevels(voice: ActiveVoice): void {
-    voice.osc1Gain.gain.value = 1 - this.params.oscMix;
-    voice.osc2Gain.gain.value = this.params.oscMix;
+    for (let osc = 0; osc < OSC_COUNT; osc += 1) {
+      voice.oscGains[osc].gain.value = this.params.oscLevels[osc];
+    }
   }
 
-  private applyOsc2Pitch(voice: ActiveVoice, when: number): void {
-    const tuned = osc2TunedFrequency(voice.baseFrequency, this.params.osc2Pitch);
-    voice.osc2Osc.frequency.cancelScheduledValues(when);
-    voice.osc2Osc.frequency.setValueAtTime(Math.max(20, tuned), when);
+  private applyOscPitch(voice: ActiveVoice, osc: OscId, when: number): void {
+    const tuned = oscTunedFrequency(
+      voice.baseFrequency,
+      this.params.oscPitches[osc],
+    );
+    voice.oscillators[osc].frequency.cancelScheduledValues(when);
+    voice.oscillators[osc].frequency.setValueAtTime(Math.max(20, tuned), when);
   }
 
   private applyFilterSettings(filter: BiquadFilterNode): void {
@@ -1983,7 +1973,7 @@ class SimpleSynth {
   ): void {
     const pitchKnob = this.effectsParams.pitchAmount;
 
-    if (osc2PitchKnobToCents(pitchKnob) === 0) {
+    if (oscPitchKnobToCents(pitchKnob) === 0) {
       return;
     }
 
@@ -2056,38 +2046,45 @@ class SimpleSynth {
     return baseFrequency * (2 ** (cents / 1200) - 1);
   }
 
-  private configureOsc1(
+  private configureOscillator(
     oscillator: OscillatorNode,
+    osc: OscId,
     context: AudioContext,
   ): void {
-    if (this.params.osc1Waveform === "pulse") {
-      oscillator.setPeriodicWave(this.getPulseWave(context));
+    const waveform = this.params.oscWaveforms[osc];
+    if (waveform === "pulse") {
+      oscillator.setPeriodicWave(this.getPulseWave(osc, context));
       return;
     }
-
-    oscillator.type = "sawtooth";
+    if (waveform === "saw") {
+      oscillator.type = "sawtooth";
+      return;
+    }
+    if (waveform === "triangle") {
+      oscillator.type = "triangle";
+      return;
+    }
+    oscillator.type = "sine";
   }
 
-  private configureOsc2(oscillator: OscillatorNode): void {
-    oscillator.type =
-      this.params.osc2Waveform === "triangle" ? "triangle" : "sine";
-  }
-
-  private getPulseWave(context: AudioContext): PeriodicWave {
-    if (!this.pulseWave) {
-      this.updatePulseWave(context);
+  private getPulseWave(osc: OscId, context: AudioContext): PeriodicWave {
+    if (!this.pulseWaves[osc]) {
+      this.updatePulseWave(osc, context);
     }
 
-    return this.pulseWave ?? context.createPeriodicWave(this.pulseReal, this.pulseImag);
+    return (
+      this.pulseWaves[osc]
+      ?? context.createPeriodicWave(this.pulseReal, this.pulseImag)
+    );
   }
 
-  private updatePulseWave(context?: AudioContext): void {
+  private updatePulseWave(osc: OscId, context?: AudioContext): void {
     const ctx = context ?? this.context;
     if (!ctx) {
       return;
     }
 
-    const duty = pulseWidthToDuty(this.params.pulseWidth);
+    const duty = pulseWidthToDuty(this.params.oscPulseWidths[osc]);
     this.pulseReal.fill(0);
     this.pulseImag.fill(0);
 
@@ -2096,7 +2093,7 @@ class SimpleSynth {
         (2 / (harmonic * Math.PI)) * Math.sin(harmonic * Math.PI * duty);
     }
 
-    this.pulseWave = ctx.createPeriodicWave(this.pulseReal, this.pulseImag);
+    this.pulseWaves[osc] = ctx.createPeriodicWave(this.pulseReal, this.pulseImag);
   }
 }
 
@@ -2120,7 +2117,7 @@ const MODULE_COLUMN_MIN_WIDTH = knobRowMinWidth(4);
 const OSC_MODULE_MIN_WIDTH =
   2 * OSC_WAVEFORM_BUTTON_WIDTH_PX +
   3 * KNOB_SIZE_PX +
-  4 * KNOB_GAP_PX +
+  5 * KNOB_GAP_PX +
   KNOB_ROW_PADDING_PX;
 const VIBRATO_CONTROLS_MIN_WIDTH =
   OSC_WAVEFORM_BUTTON_WIDTH_PX +
@@ -2139,7 +2136,7 @@ export class SynthApp {
   private layoutObserver: ResizeObserver | null = null;
   private keyboardHeightPx = 96;
   private synth = new SimpleSynth();
-  private params: SynthParams = { ...DEFAULT_PARAMS };
+  private params: SynthParams = cloneParams(DEFAULT_PARAMS);
   private effectsParams: EffectsParams = { ...DEFAULT_EFFECTS };
   private pressedKeys = new Set<number>();
   private keyButtons = new Map<number, HTMLButtonElement>();
@@ -2158,9 +2155,15 @@ export class SynthApp {
   private filterCanvas: HTMLCanvasElement | null = null;
   private vibratoCanvas: HTMLCanvasElement | null = null;
   private masterCanvas: HTMLCanvasElement | null = null;
-  private widthKnobElement: HTMLElement | null = null;
-  private osc1Buttons = new Map<Osc1Waveform, HTMLButtonElement>();
-  private osc2Buttons = new Map<Osc2Waveform, HTMLButtonElement>();
+  private activeOscTab: OscId = 0;
+  private oscTabButtons = new Map<OscId, HTMLButtonElement>();
+  private oscTabPanels = new Map<OscId, HTMLElement>();
+  private oscWaveformButtons: Array<Map<OscWaveform, HTMLButtonElement>> = [
+    new Map(),
+    new Map(),
+    new Map(),
+  ];
+  private oscWidthKnobElements = new Map<OscId, HTMLElement>();
   private vibratoButtons = new Map<VibratoWaveform, HTMLButtonElement>();
   private paramKnobs = new Map<string, RotaryKnobHandle>();
   private effectKnobs = new Map<keyof EffectsParams, RotaryKnobHandle>();
@@ -2289,9 +2292,12 @@ export class SynthApp {
     this.filterCanvas = null;
     this.vibratoCanvas = null;
     this.masterCanvas = null;
-    this.widthKnobElement = null;
-    this.osc1Buttons.clear();
-    this.osc2Buttons.clear();
+    this.oscTabButtons.clear();
+    this.oscTabPanels.clear();
+    for (const buttons of this.oscWaveformButtons) {
+      buttons.clear();
+    }
+    this.oscWidthKnobElements.clear();
     this.vibratoButtons.clear();
     this.paramKnobs.clear();
     this.effectKnobs.clear();
@@ -2357,6 +2363,7 @@ export class SynthApp {
         this.waveformCanvas,
         this.params,
         SECTION_THEMES.oscillator,
+        this.activeOscTab,
       );
     }
     if (this.filterCanvas) {
@@ -2623,10 +2630,70 @@ export class SynthApp {
     this.waveformCanvas = document.createElement("canvas");
     this.waveformCanvas.className = CANVAS_PREVIEW_CLASS;
 
-    const controlsRow = document.createElement("div");
-    controlsRow.className =
-      "flex shrink-0 flex-nowrap items-end justify-between gap-2 p-3";
-    controlsRow.style.minWidth = `${OSC_MODULE_MIN_WIDTH}px`;
+    const heading = document.createElement("div");
+    heading.className =
+      "flex items-center justify-between gap-2 border-b border-slate-800 px-3 py-2";
+
+    const title = document.createElement("div");
+    title.className =
+      "text-xs font-medium uppercase tracking-wide text-slate-400";
+    title.textContent = "Oscillator";
+
+    const tabs = document.createElement("div");
+    tabs.className = "flex items-center gap-1";
+    tabs.setAttribute("role", "tablist");
+    tabs.setAttribute("aria-label", "Oscillator");
+
+    for (let osc = 0; osc < OSC_COUNT; osc += 1) {
+      const tab = document.createElement("button");
+      tab.type = "button";
+      tab.setAttribute("role", "tab");
+      tab.dataset.oscTab = String(osc);
+      tab.textContent = `Osc ${osc + 1}`;
+      tab.className =
+        "rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors";
+      tab.addEventListener(
+        "click",
+        () => {
+          this.setActiveOscTab(osc as OscId);
+        },
+        { signal: this.abort.signal },
+      );
+      this.oscTabButtons.set(osc as OscId, tab);
+      tabs.append(tab);
+    }
+
+    heading.append(title, tabs);
+
+    const body = document.createElement("div");
+    body.className = "relative";
+
+    for (let osc = 0; osc < OSC_COUNT; osc += 1) {
+      const tabPanel = this.createOscTabPanel(osc as OscId);
+      this.oscTabPanels.set(osc as OscId, tabPanel);
+      body.append(tabPanel);
+    }
+
+    const primary = document.createElement("div");
+    primary.className = "flex min-w-0 flex-col";
+    primary.append(heading, this.waveformCanvas, body);
+
+    panel.append(
+      primary,
+      this.createEffectFooter("Pitch Envelope", this.createPitchControls()),
+    );
+
+    this.setActiveOscTab(this.activeOscTab);
+    return panel;
+  }
+
+  private createOscTabPanel(osc: OscId): HTMLElement {
+    const panel = document.createElement("div");
+    panel.className =
+      "flex shrink-0 flex-nowrap items-end justify-start gap-2 p-3";
+    panel.style.minWidth = `${OSC_MODULE_MIN_WIDTH}px`;
+    panel.setAttribute("role", "tabpanel");
+    panel.dataset.oscPanel = String(osc);
 
     const knobValueSpacer = document.createElement("span");
     knobValueSpacer.className =
@@ -2634,96 +2701,78 @@ export class SynthApp {
     knobValueSpacer.textContent = "100%";
     knobValueSpacer.setAttribute("aria-hidden", "true");
 
-    const waveformGroup = document.createElement("div");
-    waveformGroup.className = "flex shrink-0 items-end gap-2";
+    const waveformColumn = document.createElement("div");
+    waveformColumn.className = "flex shrink-0 flex-col items-center gap-0.5";
 
-    const osc1Column = document.createElement("div");
-    osc1Column.className = "flex shrink-0 flex-col items-center gap-0.5";
+    const waveformGrid = document.createElement("div");
+    waveformGrid.className = "grid grid-cols-2 gap-1";
 
-    const osc1Buttons = document.createElement("div");
-    osc1Buttons.className = "flex flex-col gap-1";
-
-    for (const option of OSC1_OPTIONS) {
+    for (const option of OSC_WAVEFORM_OPTIONS) {
       const button = this.createOscWaveformButton(option.label, () => {
-        this.setOsc1Waveform(option.value);
+        this.setOscWaveform(osc, option.value);
       });
-      this.osc1Buttons.set(option.value, button);
-      osc1Buttons.append(button);
+      this.oscWaveformButtons[osc].set(option.value, button);
+      waveformGrid.append(button);
     }
 
-    const osc1Label = document.createElement("span");
-    osc1Label.className =
+    const waveLabel = document.createElement("span");
+    waveLabel.className =
       "text-[9px] font-medium uppercase tracking-wide text-slate-500";
-    osc1Label.textContent = "Osc 1";
-    osc1Column.append(knobValueSpacer.cloneNode(true), osc1Buttons, osc1Label);
-
-    const osc2Column = document.createElement("div");
-    osc2Column.className = "flex shrink-0 flex-col items-center gap-0.5";
-
-    const osc2Buttons = document.createElement("div");
-    osc2Buttons.className = "flex flex-col gap-1";
-
-    for (const option of OSC2_OPTIONS) {
-      const button = this.createOscWaveformButton(option.label, () => {
-        this.setOsc2Waveform(option.value);
-      });
-      this.osc2Buttons.set(option.value, button);
-      osc2Buttons.append(button);
-    }
-
-    const osc2Label = document.createElement("span");
-    osc2Label.className =
-      "text-[9px] font-medium uppercase tracking-wide text-slate-500";
-    osc2Label.textContent = "Osc 2";
-    osc2Column.append(knobValueSpacer.cloneNode(true), osc2Buttons, osc2Label);
-
-    waveformGroup.append(osc1Column, osc2Column);
+    waveLabel.textContent = "Wave";
+    waveformColumn.append(knobValueSpacer, waveformGrid, waveLabel);
 
     const knobsGroup = document.createElement("div");
-    knobsGroup.className =
-      "flex shrink-0 flex-nowrap items-start gap-2";
+    knobsGroup.className = "flex shrink-0 flex-nowrap items-start gap-2";
 
-    this.widthKnobElement = this.createParamKnob(
-      "Width",
-      "pulseWidth",
-      0,
-      1,
-      0.01,
-      pulseWidthLabel,
-      "oscillator",
-    );
-    this.widthKnobElement.classList.add("shrink-0");
+    const levelKnob = this.createOscLevelKnob(osc);
+    levelKnob.classList.add("shrink-0");
 
-    const mixKnob = this.createParamKnob(
-      "Mix",
-      "oscMix",
-      0,
-      1,
-      0.01,
-      (value) => `${Math.round(value * 100)}%`,
-      "oscillator",
-    );
-    mixKnob.classList.add("shrink-0");
+    const widthKnob = this.createOscWidthKnob(osc);
+    widthKnob.classList.add("shrink-0");
+    this.oscWidthKnobElements.set(osc, widthKnob);
 
-    const pitchKnob = this.createOsc2PitchKnob();
+    const pitchKnob = this.createOscPitchKnob(osc);
     pitchKnob.classList.add("shrink-0");
 
-    knobsGroup.append(mixKnob, this.widthKnobElement, pitchKnob);
+    knobsGroup.append(levelKnob, pitchKnob, widthKnob);
+    panel.append(waveformColumn, knobsGroup);
+    return panel;
+  }
 
-    controlsRow.append(waveformGroup, knobsGroup);
+  private setActiveOscTab(osc: OscId): void {
+    this.activeOscTab = osc;
+    const theme = SECTION_THEMES.oscillator;
 
-    const primary = document.createElement("div");
-    primary.className = "flex min-w-0 flex-col";
-    primary.append(this.createSectionHeading("Oscillator"), this.waveformCanvas, controlsRow);
+    for (const [id, button] of this.oscTabButtons) {
+      const active = id === osc;
+      button.setAttribute("aria-selected", active ? "true" : "false");
+      if (active) {
+        button.style.borderColor = `${theme.accent}99`;
+        button.style.backgroundColor = theme.accentFill;
+        button.style.color = theme.accentBright;
+      } else {
+        button.style.borderColor = "";
+        button.style.backgroundColor = "";
+        button.style.color = "";
+        button.className =
+          "rounded-md border border-slate-700 bg-slate-900/60 px-2 py-0.5 text-[11px] font-medium text-slate-400 transition-colors hover:border-slate-600 hover:text-slate-200";
+      }
+      if (active) {
+        button.className =
+          "rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors";
+        button.style.borderColor = `${theme.accent}99`;
+        button.style.backgroundColor = theme.accentFill;
+        button.style.color = theme.accentBright;
+      }
+    }
 
-    panel.append(
-      primary,
-      this.createEffectFooter("Pitch Envelope", this.createPitchControls()),
-    );
+    for (const [id, panel] of this.oscTabPanels) {
+      panel.classList.toggle("hidden", id !== osc);
+    }
 
     this.updateOscWaveformButtons();
     this.updateWidthKnobVisibility();
-    return panel;
+    this.updateVisualizations();
   }
 
   private createOscWaveformButton(
@@ -2739,26 +2788,15 @@ export class SynthApp {
     return button;
   }
 
-  private setOsc1Waveform(waveform: Osc1Waveform): void {
-    if (this.params.osc1Waveform === waveform) {
+  private setOscWaveform(osc: OscId, waveform: OscWaveform): void {
+    if (this.params.oscWaveforms[osc] === waveform) {
       return;
     }
 
-    this.params.osc1Waveform = waveform;
+    this.params.oscWaveforms[osc] = waveform;
     this.synth.setParams(this.params);
     this.updateOscWaveformButtons();
     this.updateWidthKnobVisibility();
-    this.updateVisualizations();
-  }
-
-  private setOsc2Waveform(waveform: Osc2Waveform): void {
-    if (this.params.osc2Waveform === waveform) {
-      return;
-    }
-
-    this.params.osc2Waveform = waveform;
-    this.synth.setParams(this.params);
-    this.updateOscWaveformButtons();
     this.updateVisualizations();
   }
 
@@ -2786,20 +2824,20 @@ export class SynthApp {
       }
     };
 
-    for (const [waveform, button] of this.osc1Buttons) {
-      applyState(button, this.params.osc1Waveform === waveform);
-    }
-
-    for (const [waveform, button] of this.osc2Buttons) {
-      applyState(button, this.params.osc2Waveform === waveform);
+    for (let osc = 0; osc < OSC_COUNT; osc += 1) {
+      for (const [waveform, button] of this.oscWaveformButtons[osc]) {
+        applyState(button, this.params.oscWaveforms[osc] === waveform);
+      }
     }
   }
 
   private updateWidthKnobVisibility(): void {
-    this.widthKnobElement?.classList.toggle(
-      "hidden",
-      this.params.osc1Waveform !== "pulse",
-    );
+    for (let osc = 0; osc < OSC_COUNT; osc += 1) {
+      this.oscWidthKnobElements.get(osc as OscId)?.classList.toggle(
+        "hidden",
+        this.params.oscWaveforms[osc] !== "pulse",
+      );
+    }
   }
 
   private createVibratoSection(): HTMLElement {
@@ -3036,11 +3074,11 @@ export class SynthApp {
       min: 0,
       max: 1,
       step: 0.01,
-      value: snapOsc2PitchKnob(this.effectsParams.pitchAmount),
-      format: formatOsc2Pitch,
+      value: snapOscPitchKnob(this.effectsParams.pitchAmount),
+      format: formatOscPitch,
       ...this.themeKnobOptions("oscillator"),
       onChange: (value) => {
-        const snapped = snapOsc2PitchKnob(value);
+        const snapped = snapOscPitchKnob(value);
         if (snapped !== value) {
           knob.setValue(snapped);
         }
@@ -3099,27 +3137,68 @@ export class SynthApp {
     return knob.element;
   }
 
-  private createOsc2PitchKnob(): HTMLElement {
+  private createOscLevelKnob(osc: OscId): HTMLElement {
+    const key = `osc${osc}Level`;
+    const knob = createRotaryKnob({
+      label: "Level",
+      min: 0,
+      max: 1,
+      step: 0.01,
+      value: this.params.oscLevels[osc],
+      format: (value) => `${Math.round(value * 100)}%`,
+      ...this.themeKnobOptions("oscillator"),
+      onChange: (value) => {
+        this.params.oscLevels[osc] = value;
+        this.synth.setParams(this.params);
+        this.updateVisualizations();
+      },
+    });
+    this.paramKnobs.set(key, knob);
+    return knob.element;
+  }
+
+  private createOscWidthKnob(osc: OscId): HTMLElement {
+    const key = `osc${osc}PulseWidth`;
+    const knob = createRotaryKnob({
+      label: "Width",
+      min: 0,
+      max: 1,
+      step: 0.01,
+      value: this.params.oscPulseWidths[osc],
+      format: pulseWidthLabel,
+      ...this.themeKnobOptions("oscillator"),
+      onChange: (value) => {
+        this.params.oscPulseWidths[osc] = value;
+        this.synth.setParams(this.params);
+        this.updateVisualizations();
+      },
+    });
+    this.paramKnobs.set(key, knob);
+    return knob.element;
+  }
+
+  private createOscPitchKnob(osc: OscId): HTMLElement {
+    const key = `osc${osc}Pitch`;
     const knob = createRotaryKnob({
       label: "Pitch",
       min: 0,
       max: 1,
       step: 0.01,
-      value: snapOsc2PitchKnob(this.params.osc2Pitch),
-      format: formatOsc2Pitch,
+      value: snapOscPitchKnob(this.params.oscPitches[osc]),
+      format: formatOscPitch,
       ...this.themeKnobOptions("oscillator"),
       onChange: (value) => {
-        const snapped = snapOsc2PitchKnob(value);
+        const snapped = snapOscPitchKnob(value);
         if (snapped !== value) {
           knob.setValue(snapped);
         }
-        this.params = { ...this.params, osc2Pitch: snapped };
+        this.params.oscPitches[osc] = snapped;
         this.synth.setParams(this.params);
         this.updateVisualizations();
       },
     });
 
-    this.paramKnobs.set("osc2Pitch", knob);
+    this.paramKnobs.set(key, knob);
     return knob.element;
   }
 
@@ -3178,19 +3257,34 @@ export class SynthApp {
   }
 
   private resetToDefaults(): void {
-    this.params = { ...DEFAULT_PARAMS };
+    this.params = cloneParams(DEFAULT_PARAMS);
     this.effectsParams = { ...DEFAULT_EFFECTS };
     this.synth.setParams(this.params);
     this.synth.setEffectsParams(this.effectsParams);
 
     for (const [key, knob] of this.paramKnobs) {
-      const value = this.params[key as keyof SynthParams];
-      if (typeof value !== "number") {
+      const oscLevelMatch = /^osc(\d+)Level$/.exec(key);
+      if (oscLevelMatch) {
+        knob.setValue(this.params.oscLevels[Number(oscLevelMatch[1])] ?? 0);
         continue;
       }
 
-      if (key === "osc2Pitch") {
-        knob.setValue(snapOsc2PitchKnob(value));
+      const oscPitchMatch = /^osc(\d+)Pitch$/.exec(key);
+      if (oscPitchMatch) {
+        knob.setValue(
+          snapOscPitchKnob(this.params.oscPitches[Number(oscPitchMatch[1])] ?? 0.5),
+        );
+        continue;
+      }
+
+      const oscWidthMatch = /^osc(\d+)PulseWidth$/.exec(key);
+      if (oscWidthMatch) {
+        knob.setValue(this.params.oscPulseWidths[Number(oscWidthMatch[1])] ?? 1);
+        continue;
+      }
+
+      const value = this.params[key as keyof SynthParams];
+      if (typeof value !== "number") {
         continue;
       }
 
@@ -3204,13 +3298,14 @@ export class SynthApp {
 
     for (const [key, knob] of this.effectKnobs) {
       if (key === "pitchAmount") {
-        knob.setValue(snapOsc2PitchKnob(this.effectsParams.pitchAmount));
+        knob.setValue(snapOscPitchKnob(this.effectsParams.pitchAmount));
         continue;
       }
 
       knob.setValue(this.effectsParams[key]);
     }
 
+    this.setActiveOscTab(0);
     this.updateOscWaveformButtons();
     this.updateVibratoWaveformButtons();
     this.updateWidthKnobVisibility();

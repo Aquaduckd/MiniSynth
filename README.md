@@ -6,7 +6,7 @@ Play from the on-screen keyboard, your computer keys, or a MIDI controller. Shap
 
 ## Sound
 
-**Dual oscillators** — Blend two voices. Oscillator 1 offers pulse and saw; pulse width is adjustable. Oscillator 2 offers triangle and sine, with its own pitch offset for detunes, intervals, and thicker tones. Mix between them freely.
+**Three oscillators** — Tabbed voices, each with pulse, saw, triangle, and sine. Set level and pitch per oscillator; pulse width appears when a voice is set to pulse. Stack them for detunes, intervals, and thicker tones.
 
 **Pitch envelope** — Sweep pitch on each note with speed and amount controls, from subtle scoops to dramatic dives.
 
