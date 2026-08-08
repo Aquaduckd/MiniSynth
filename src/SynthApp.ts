@@ -491,8 +491,8 @@ const SECTION_THEMES: Record<SectionColor, PanelTheme> = {
 
 const OSC_WAVEFORM_OPTIONS: { value: OscWaveform; label: string }[] = [
   { value: "pulse", label: "Pulse" },
-  { value: "saw", label: "Saw" },
   { value: "triangle", label: "Triangle" },
+  { value: "saw", label: "Saw" },
   { value: "sine", label: "Sine" },
 ];
 
