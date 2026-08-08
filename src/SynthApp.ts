@@ -3713,7 +3713,58 @@ export class SynthApp {
       { signal: this.abort.signal },
     );
 
-    saveRow.append(this.presetNameInput, saveButton);
+    const exportCurrentButton = document.createElement("button");
+    exportCurrentButton.type = "button";
+    exportCurrentButton.className =
+      "shrink-0 rounded-md border border-slate-700 px-3 py-1.5 text-[11px] font-medium text-slate-300 hover:border-slate-500 hover:text-slate-100";
+    exportCurrentButton.textContent = "Export";
+    exportCurrentButton.title = "Export the current patch as a file";
+    exportCurrentButton.addEventListener(
+      "click",
+      () => {
+        this.exportCurrentPreset();
+      },
+      { signal: this.abort.signal },
+    );
+
+    const importButton = document.createElement("button");
+    importButton.type = "button";
+    importButton.className =
+      "shrink-0 rounded-md border border-slate-700 px-3 py-1.5 text-[11px] font-medium text-slate-300 hover:border-slate-500 hover:text-slate-100";
+    importButton.textContent = "Import";
+    importButton.title = "Import a preset file";
+
+    const importInput = document.createElement("input");
+    importInput.type = "file";
+    importInput.accept = "application/json,.json";
+    importInput.className = "hidden";
+    importInput.addEventListener(
+      "change",
+      () => {
+        const file = importInput.files?.[0];
+        importInput.value = "";
+        if (file) {
+          void this.importPresetFile(file);
+        }
+      },
+      { signal: this.abort.signal },
+    );
+
+    importButton.addEventListener(
+      "click",
+      () => {
+        importInput.click();
+      },
+      { signal: this.abort.signal },
+    );
+
+    saveRow.append(
+      this.presetNameInput,
+      saveButton,
+      exportCurrentButton,
+      importButton,
+      importInput,
+    );
 
     this.presetStatusEl = document.createElement("div");
     this.presetStatusEl.className = "min-h-[1rem] text-[11px] text-slate-500";
@@ -3822,7 +3873,21 @@ export class SynthApp {
         { signal: this.abort.signal },
       );
 
-      row.append(loadButton);
+      const exportButton = document.createElement("button");
+      exportButton.type = "button";
+      exportButton.className =
+        "shrink-0 rounded border border-slate-700 px-2 py-0.5 text-[10px] text-slate-400 hover:border-slate-500 hover:text-slate-200";
+      exportButton.textContent = "Export";
+      exportButton.title = `Export “${preset.name}”`;
+      exportButton.addEventListener(
+        "click",
+        () => {
+          this.exportPreset(preset);
+        },
+        { signal: this.abort.signal },
+      );
+
+      row.append(loadButton, exportButton);
 
       if (allowDelete) {
         const deleteButton = document.createElement("button");
@@ -3908,6 +3973,116 @@ export class SynthApp {
     this.refreshPresetList();
     if (this.presetStatusEl) {
       this.presetStatusEl.textContent = `Deleted “${preset.name}”`;
+    }
+  }
+
+  private exportCurrentPreset(): void {
+    const name = this.presetNameInput?.value.trim() || "MiniSynth Preset";
+    this.exportPreset({
+      id: this.activePresetId ?? `export-${Date.now()}`,
+      name,
+      builtIn: false,
+      params: cloneParams(this.params),
+      effects: cloneEffects(this.effectsParams),
+    });
+  }
+
+  private exportPreset(preset: SynthPreset): void {
+    const payload = {
+      format: "minisynth-preset",
+      version: 1,
+      name: preset.name,
+      params: cloneParams(preset.params),
+      effects: cloneEffects(preset.effects),
+    };
+    const blob = new Blob([`${JSON.stringify(payload, null, 2)}\n`], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${this.presetFilename(preset.name)}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+
+    if (this.presetStatusEl) {
+      this.presetStatusEl.textContent = `Exported “${preset.name}”`;
+    }
+  }
+
+  private presetFilename(name: string): string {
+    const slug = name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+    return slug.length > 0 ? slug : "minisynth-preset";
+  }
+
+  private async importPresetFile(file: File): Promise<void> {
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text) as unknown;
+      const record =
+        parsed && typeof parsed === "object"
+          ? (parsed as Record<string, unknown>)
+          : null;
+
+      if (
+        record
+        && record.format !== undefined
+        && record.format !== "minisynth-preset"
+      ) {
+        if (this.presetStatusEl) {
+          this.presetStatusEl.textContent = "Unrecognized preset file";
+        }
+        return;
+      }
+
+      const preset = normalizeStoredPreset({
+        id: `user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        name:
+          typeof record?.name === "string" && record.name.trim().length > 0
+            ? record.name
+            : file.name.replace(/\.json$/i, ""),
+        params: record?.params,
+        effects: record?.effects,
+      });
+
+      if (!preset) {
+        if (this.presetStatusEl) {
+          this.presetStatusEl.textContent = "Could not read that preset file";
+        }
+        return;
+      }
+
+      const existingIndex = this.userPresets.findIndex(
+        (entry) => entry.name.toLowerCase() === preset.name.toLowerCase(),
+      );
+      if (existingIndex >= 0) {
+        preset.id = this.userPresets[existingIndex].id;
+        this.userPresets[existingIndex] = preset;
+      } else {
+        this.userPresets.push(preset);
+      }
+
+      this.userPresets.sort((left, right) =>
+        left.name.localeCompare(right.name, undefined, { sensitivity: "base" }),
+      );
+      saveUserPresets(this.userPresets);
+      this.applyPreset(preset);
+      if (this.presetNameInput) {
+        this.presetNameInput.value = preset.name;
+      }
+      if (this.presetStatusEl) {
+        this.presetStatusEl.textContent =
+          existingIndex >= 0
+            ? `Imported and updated “${preset.name}”`
+            : `Imported “${preset.name}”`;
+      }
+    } catch {
+      if (this.presetStatusEl) {
+        this.presetStatusEl.textContent = "Could not read that preset file";
+      }
     }
   }
 
