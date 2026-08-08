@@ -4,6 +4,8 @@ export interface RotaryKnobOptions {
   max: number;
   step: number;
   value: number;
+  /** Value restored on double-click. Defaults to the initial `value`. */
+  defaultValue?: number;
   size?: number;
   format: (value: number) => string;
   onChange: (value: number) => void;
@@ -112,6 +114,12 @@ export function createRotaryKnob(options: RotaryKnobOptions): RotaryKnobHandle {
   const accentBright = options.accentBright ?? "#5eead4";
   const valueColor = options.valueColor ?? accentBright;
   let value = snapToStep(options.value, options.min, options.max, options.step);
+  const defaultValue = snapToStep(
+    options.defaultValue ?? options.value,
+    options.min,
+    options.max,
+    options.step,
+  );
   let dragging = false;
   let dragStartY = 0;
   let dragStartValue = value;
@@ -127,7 +135,7 @@ export function createRotaryKnob(options: RotaryKnobOptions): RotaryKnobHandle {
   const dial = document.createElement("div");
   dial.className =
     "relative cursor-ns-resize touch-none select-none rounded-full";
-  dial.title = `${options.label}: drag up/down to adjust`;
+  dial.title = `${options.label}: drag up/down to adjust · double-click to reset`;
 
   const canvas = document.createElement("canvas");
   canvas.className = "block";
@@ -202,6 +210,12 @@ export function createRotaryKnob(options: RotaryKnobOptions): RotaryKnobHandle {
     },
     { passive: false },
   );
+
+  dial.addEventListener("dblclick", (event) => {
+    event.preventDefault();
+    dragging = false;
+    emit(defaultValue);
+  });
 
   redraw();
 

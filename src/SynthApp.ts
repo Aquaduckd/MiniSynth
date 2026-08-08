@@ -140,6 +140,267 @@ const DEFAULT_EFFECTS: EffectsParams = {
   masterVolume: MASTER_GAIN,
 };
 
+interface SynthPreset {
+  id: string;
+  name: string;
+  builtIn: boolean;
+  params: SynthParams;
+  effects: EffectsParams;
+}
+
+const PRESET_STORAGE_KEY = "minisynth.presets.v1";
+
+function cloneEffects(effects: EffectsParams): EffectsParams {
+  return { ...effects };
+}
+
+function makeBuiltInPreset(
+  id: string,
+  name: string,
+  params: Partial<SynthParams>,
+  effects: Partial<EffectsParams> = {},
+): SynthPreset {
+  return {
+    id,
+    name,
+    builtIn: true,
+    params: cloneParams({ ...DEFAULT_PARAMS, ...params }),
+    effects: cloneEffects({ ...DEFAULT_EFFECTS, ...effects }),
+  };
+}
+
+const BUILT_IN_PRESETS: SynthPreset[] = [
+  makeBuiltInPreset("init", "Default", {}),
+];
+
+function loadUserPresets(): SynthPreset[] {
+  try {
+    const raw = localStorage.getItem(PRESET_STORAGE_KEY);
+    if (!raw) {
+      return [];
+    }
+
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return parsed.flatMap((entry) => {
+      const preset = normalizeStoredPreset(entry);
+      return preset ? [preset] : [];
+    });
+  } catch {
+    return [];
+  }
+}
+
+function saveUserPresets(presets: SynthPreset[]): void {
+  const payload = presets
+    .filter((preset) => !preset.builtIn)
+    .map((preset) => ({
+      id: preset.id,
+      name: preset.name,
+      params: cloneParams(preset.params),
+      effects: cloneEffects(preset.effects),
+    }));
+  localStorage.setItem(PRESET_STORAGE_KEY, JSON.stringify(payload));
+}
+
+function isOscWaveform(value: unknown): value is OscWaveform {
+  return (
+    value === "pulse"
+    || value === "saw"
+    || value === "triangle"
+    || value === "sine"
+  );
+}
+
+function isVibratoWaveform(value: unknown): value is VibratoWaveform {
+  return value === "triangle" || value === "square";
+}
+
+function normalizeNumber(
+  value: unknown,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, value));
+}
+
+function normalizeStoredPreset(entry: unknown): SynthPreset | null {
+  if (!entry || typeof entry !== "object") {
+    return null;
+  }
+
+  const record = entry as Record<string, unknown>;
+  if (typeof record.name !== "string" || record.name.trim().length === 0) {
+    return null;
+  }
+  if (!record.params || typeof record.params !== "object") {
+    return null;
+  }
+  if (!record.effects || typeof record.effects !== "object") {
+    return null;
+  }
+
+  const rawParams = record.params as Record<string, unknown>;
+  const rawEffects = record.effects as Record<string, unknown>;
+  const waveforms = Array.isArray(rawParams.oscWaveforms)
+    ? rawParams.oscWaveforms
+    : DEFAULT_PARAMS.oscWaveforms;
+  const levels = Array.isArray(rawParams.oscLevels)
+    ? rawParams.oscLevels
+    : DEFAULT_PARAMS.oscLevels;
+  const pitches = Array.isArray(rawParams.oscPitches)
+    ? rawParams.oscPitches
+    : DEFAULT_PARAMS.oscPitches;
+  const widths = Array.isArray(rawParams.oscPulseWidths)
+    ? rawParams.oscPulseWidths
+    : DEFAULT_PARAMS.oscPulseWidths;
+
+  const params = cloneParams({
+    ...DEFAULT_PARAMS,
+    oscWaveforms: [0, 1, 2].map((index) =>
+      isOscWaveform(waveforms[index])
+        ? waveforms[index]
+        : DEFAULT_PARAMS.oscWaveforms[index],
+    ) as OscWaveformTuple,
+    oscLevels: [0, 1, 2].map((index) =>
+      normalizeNumber(levels[index], DEFAULT_PARAMS.oscLevels[index], 0, 1),
+    ) as OscNumberTuple,
+    oscPitches: [0, 1, 2].map((index) =>
+      normalizeNumber(pitches[index], DEFAULT_PARAMS.oscPitches[index], 0, 1),
+    ) as OscNumberTuple,
+    oscPulseWidths: [0, 1, 2].map((index) =>
+      normalizeNumber(widths[index], DEFAULT_PARAMS.oscPulseWidths[index], 0, 1),
+    ) as OscNumberTuple,
+    attack: normalizeNumber(rawParams.attack, DEFAULT_PARAMS.attack, 0, 2),
+    decay: normalizeNumber(rawParams.decay, DEFAULT_PARAMS.decay, 0, 2),
+    sustain: normalizeNumber(rawParams.sustain, DEFAULT_PARAMS.sustain, 0, 1),
+    release: normalizeNumber(rawParams.release, DEFAULT_PARAMS.release, 0, 2),
+    filterInitial: normalizeNumber(
+      rawParams.filterInitial,
+      DEFAULT_PARAMS.filterInitial,
+      0,
+      1,
+    ),
+    filterFinal: normalizeNumber(
+      rawParams.filterFinal,
+      DEFAULT_PARAMS.filterFinal,
+      0,
+      1,
+    ),
+    filterSpeed: normalizeNumber(
+      rawParams.filterSpeed,
+      DEFAULT_PARAMS.filterSpeed,
+      0,
+      1,
+    ),
+    filterResonance: normalizeNumber(
+      rawParams.filterResonance,
+      DEFAULT_PARAMS.filterResonance,
+      0,
+      1,
+    ),
+    vibratoRate: normalizeNumber(
+      rawParams.vibratoRate,
+      DEFAULT_PARAMS.vibratoRate,
+      0.5,
+      20,
+    ),
+    vibratoDelay: normalizeNumber(
+      rawParams.vibratoDelay,
+      DEFAULT_PARAMS.vibratoDelay,
+      0,
+      2,
+    ),
+    vibratoRamp: normalizeNumber(
+      rawParams.vibratoRamp,
+      DEFAULT_PARAMS.vibratoRamp,
+      0,
+      2,
+    ),
+    vibratoAmount: normalizeNumber(
+      rawParams.vibratoAmount,
+      DEFAULT_PARAMS.vibratoAmount,
+      0,
+      1,
+    ),
+    vibratoWaveform: isVibratoWaveform(rawParams.vibratoWaveform)
+      ? rawParams.vibratoWaveform
+      : DEFAULT_PARAMS.vibratoWaveform,
+  });
+
+  const effects = cloneEffects({
+    ...DEFAULT_EFFECTS,
+    delayTime: normalizeNumber(
+      rawEffects.delayTime,
+      DEFAULT_EFFECTS.delayTime,
+      0,
+      1,
+    ),
+    delayFeedback: normalizeNumber(
+      rawEffects.delayFeedback,
+      DEFAULT_EFFECTS.delayFeedback,
+      0,
+      0.85,
+    ),
+    delayMix: normalizeNumber(
+      rawEffects.delayMix,
+      DEFAULT_EFFECTS.delayMix,
+      0,
+      1,
+    ),
+    reverbDecay: normalizeNumber(
+      rawEffects.reverbDecay,
+      DEFAULT_EFFECTS.reverbDecay,
+      0,
+      1,
+    ),
+    reverbMix: normalizeNumber(
+      rawEffects.reverbMix,
+      DEFAULT_EFFECTS.reverbMix,
+      0,
+      1,
+    ),
+    pitchSpeed: normalizeNumber(
+      rawEffects.pitchSpeed,
+      DEFAULT_EFFECTS.pitchSpeed,
+      0,
+      1,
+    ),
+    pitchAmount: normalizeNumber(
+      rawEffects.pitchAmount,
+      DEFAULT_EFFECTS.pitchAmount,
+      0,
+      1,
+    ),
+    masterVolume: normalizeNumber(
+      rawEffects.masterVolume,
+      DEFAULT_EFFECTS.masterVolume,
+      0,
+      1,
+    ),
+  });
+
+  const id =
+    typeof record.id === "string" && record.id.trim().length > 0
+      ? record.id
+      : `user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  return {
+    id,
+    name: record.name.trim().slice(0, 48),
+    builtIn: false,
+    params,
+    effects,
+  };
+}
+
 const MIN_REVERB_SECONDS = 0;
 const MAX_REVERB_SECONDS = 10;
 const MAX_DELAY_SECONDS = 1;
@@ -2172,6 +2433,12 @@ export class SynthApp {
   private midiAccess: MIDIAccess | null = null;
   private readonly midiBoundInputs = new Set<MIDIInput>();
   private readonly abort = new AbortController();
+  private userPresets: SynthPreset[] = loadUserPresets();
+  private presetModal: HTMLElement | null = null;
+  private presetListEl: HTMLElement | null = null;
+  private presetNameInput: HTMLInputElement | null = null;
+  private presetStatusEl: HTMLElement | null = null;
+  private activePresetId: string | null = "init";
 
   mount(container: HTMLElement): void {
     if (this.root) {
@@ -2196,10 +2463,26 @@ export class SynthApp {
     headerLabel.textContent =
       "Synth · keyboard, MIDI, or click · Z/X octave · ./ transpose";
 
+    const headerActions = document.createElement("div");
+    headerActions.className = "flex shrink-0 items-center gap-2";
+
+    const presetsButton = document.createElement("button");
+    presetsButton.type = "button";
+    presetsButton.className =
+      "rounded border border-slate-700 px-2 py-1 text-[11px] text-slate-300 hover:border-slate-500 hover:text-slate-100";
+    presetsButton.textContent = "Presets";
+    presetsButton.addEventListener(
+      "click",
+      () => {
+        this.openPresetsModal();
+      },
+      { signal: this.abort.signal },
+    );
+
     const resetButton = document.createElement("button");
     resetButton.type = "button";
     resetButton.className =
-      "shrink-0 rounded border border-slate-700 px-2 py-1 text-[11px] text-slate-300 hover:border-slate-500 hover:text-slate-100";
+      "rounded border border-slate-700 px-2 py-1 text-[11px] text-slate-300 hover:border-slate-500 hover:text-slate-100";
     resetButton.textContent = "Reset";
     resetButton.addEventListener(
       "click",
@@ -2209,7 +2492,8 @@ export class SynthApp {
       { signal: this.abort.signal },
     );
 
-    header.append(headerLabel, resetButton);
+    headerActions.append(presetsButton, resetButton);
+    header.append(headerLabel, headerActions);
 
     this.controlsEl = document.createElement("div");
     this.controlsEl.className =
@@ -2281,6 +2565,11 @@ export class SynthApp {
     this.layoutObserver = null;
     this.unbindMidi();
     this.abort.abort();
+    this.presetModal?.remove();
+    this.presetModal = null;
+    this.presetListEl = null;
+    this.presetNameInput = null;
+    this.presetStatusEl = null;
     this.root?.remove();
     this.root = null;
     this.controlsEl = null;
@@ -3257,11 +3546,20 @@ export class SynthApp {
   }
 
   private resetToDefaults(): void {
-    this.params = cloneParams(DEFAULT_PARAMS);
-    this.effectsParams = { ...DEFAULT_EFFECTS };
+    this.applyPreset(BUILT_IN_PRESETS[0]);
+  }
+
+  private applyPreset(preset: SynthPreset): void {
+    this.params = cloneParams(preset.params);
+    this.effectsParams = cloneEffects(preset.effects);
+    this.activePresetId = preset.id;
     this.synth.setParams(this.params);
     this.synth.setEffectsParams(this.effectsParams);
+    this.syncControlsFromState();
+    this.refreshPresetList();
+  }
 
+  private syncControlsFromState(): void {
     for (const [key, knob] of this.paramKnobs) {
       const oscLevelMatch = /^osc(\d+)Level$/.exec(key);
       if (oscLevelMatch) {
@@ -3310,6 +3608,307 @@ export class SynthApp {
     this.updateVibratoWaveformButtons();
     this.updateWidthKnobVisibility();
     this.updateVisualizations();
+  }
+
+  private openPresetsModal(): void {
+    if (!this.presetModal) {
+      this.presetModal = this.createPresetsModal();
+      document.body.append(this.presetModal);
+    }
+
+    this.presetStatusEl && (this.presetStatusEl.textContent = "");
+    this.refreshPresetList();
+    this.presetModal.classList.remove("hidden");
+    this.presetModal.classList.add("flex");
+    this.presetNameInput?.focus();
+    this.presetNameInput?.select();
+  }
+
+  private closePresetsModal(): void {
+    if (!this.presetModal) {
+      return;
+    }
+
+    this.presetModal.classList.add("hidden");
+    this.presetModal.classList.remove("flex");
+  }
+
+  private createPresetsModal(): HTMLElement {
+    const overlay = document.createElement("div");
+    overlay.className =
+      "fixed inset-0 z-50 hidden items-center justify-center bg-slate-950/70 p-4 backdrop-blur-[2px]";
+
+    const dialog = document.createElement("div");
+    dialog.className =
+      "flex max-h-[min(36rem,90vh)] w-full max-w-md flex-col overflow-hidden rounded-lg border border-slate-700 bg-slate-900 shadow-2xl";
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    dialog.setAttribute("aria-label", "Presets");
+
+    const header = document.createElement("div");
+    header.className =
+      "flex items-center justify-between gap-3 border-b border-slate-800 px-4 py-3";
+
+    const title = document.createElement("h2");
+    title.className = "text-sm font-medium text-slate-100";
+    title.textContent = "Presets";
+
+    const closeButton = document.createElement("button");
+    closeButton.type = "button";
+    closeButton.className =
+      "rounded border border-slate-700 px-2 py-1 text-[11px] text-slate-300 hover:border-slate-500 hover:text-slate-100";
+    closeButton.textContent = "Close";
+    closeButton.addEventListener(
+      "click",
+      () => {
+        this.closePresetsModal();
+      },
+      { signal: this.abort.signal },
+    );
+
+    header.append(title, closeButton);
+
+    this.presetListEl = document.createElement("div");
+    this.presetListEl.className =
+      "min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-3";
+
+    const saveSection = document.createElement("div");
+    saveSection.className =
+      "shrink-0 space-y-2 border-t border-slate-800 px-4 py-3";
+
+    const saveLabel = document.createElement("div");
+    saveLabel.className = "text-[11px] font-medium uppercase tracking-wide text-slate-500";
+    saveLabel.textContent = "Save current";
+
+    const saveRow = document.createElement("div");
+    saveRow.className = "flex gap-2";
+
+    this.presetNameInput = document.createElement("input");
+    this.presetNameInput.type = "text";
+    this.presetNameInput.maxLength = 48;
+    this.presetNameInput.placeholder = "Preset name";
+    this.presetNameInput.className =
+      "min-w-0 flex-1 rounded-md border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 outline-none placeholder:text-slate-600 focus:border-slate-500";
+    this.presetNameInput.addEventListener(
+      "keydown",
+      (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          this.saveCurrentPreset();
+        }
+      },
+      { signal: this.abort.signal },
+    );
+
+    const saveButton = document.createElement("button");
+    saveButton.type = "button";
+    saveButton.className =
+      "shrink-0 rounded-md border border-emerald-700/70 bg-emerald-950/40 px-3 py-1.5 text-[11px] font-medium text-emerald-300 hover:border-emerald-500 hover:text-emerald-200";
+    saveButton.textContent = "Save";
+    saveButton.addEventListener(
+      "click",
+      () => {
+        this.saveCurrentPreset();
+      },
+      { signal: this.abort.signal },
+    );
+
+    saveRow.append(this.presetNameInput, saveButton);
+
+    this.presetStatusEl = document.createElement("div");
+    this.presetStatusEl.className = "min-h-[1rem] text-[11px] text-slate-500";
+
+    saveSection.append(saveLabel, saveRow, this.presetStatusEl);
+    dialog.append(header, this.presetListEl, saveSection);
+    overlay.append(dialog);
+
+    overlay.addEventListener(
+      "click",
+      (event) => {
+        if (event.target === overlay) {
+          this.closePresetsModal();
+        }
+      },
+      { signal: this.abort.signal },
+    );
+
+    window.addEventListener(
+      "keydown",
+      (event) => {
+        if (event.key !== "Escape") {
+          return;
+        }
+        if (!this.presetModal || this.presetModal.classList.contains("hidden")) {
+          return;
+        }
+        event.preventDefault();
+        this.closePresetsModal();
+      },
+      { signal: this.abort.signal },
+    );
+
+    return overlay;
+  }
+
+  private refreshPresetList(): void {
+    if (!this.presetListEl) {
+      return;
+    }
+
+    this.presetListEl.replaceChildren();
+
+    const factorySection = this.createPresetSection(
+      "Factory",
+      BUILT_IN_PRESETS,
+      false,
+    );
+    const userSection = this.createPresetSection(
+      "Saved",
+      this.userPresets,
+      true,
+    );
+    this.presetListEl.append(factorySection, userSection);
+  }
+
+  private createPresetSection(
+    title: string,
+    presets: SynthPreset[],
+    allowDelete: boolean,
+  ): HTMLElement {
+    const section = document.createElement("section");
+    section.className = "space-y-2";
+
+    const heading = document.createElement("div");
+    heading.className =
+      "text-[11px] font-medium uppercase tracking-wide text-slate-500";
+    heading.textContent = title;
+    section.append(heading);
+
+    if (presets.length === 0) {
+      const empty = document.createElement("div");
+      empty.className =
+        "rounded-md border border-dashed border-slate-800 px-3 py-4 text-center text-[12px] text-slate-500";
+      empty.textContent = "No saved presets yet";
+      section.append(empty);
+      return section;
+    }
+
+    const list = document.createElement("div");
+    list.className = "space-y-1";
+
+    for (const preset of presets) {
+      const row = document.createElement("div");
+      row.className =
+        "flex items-center gap-2 rounded-md border border-slate-800 bg-slate-950/50 px-2 py-1.5";
+
+      if (preset.id === this.activePresetId) {
+        row.classList.add("border-emerald-700/60", "bg-emerald-950/20");
+      }
+
+      const loadButton = document.createElement("button");
+      loadButton.type = "button";
+      loadButton.className =
+        "min-w-0 flex-1 truncate text-left text-sm text-slate-200 hover:text-white";
+      loadButton.textContent = preset.name;
+      loadButton.title = `Load “${preset.name}”`;
+      loadButton.addEventListener(
+        "click",
+        () => {
+          this.applyPreset(preset);
+          if (this.presetStatusEl) {
+            this.presetStatusEl.textContent = `Loaded “${preset.name}”`;
+          }
+        },
+        { signal: this.abort.signal },
+      );
+
+      row.append(loadButton);
+
+      if (allowDelete) {
+        const deleteButton = document.createElement("button");
+        deleteButton.type = "button";
+        deleteButton.className =
+          "shrink-0 rounded border border-slate-700 px-2 py-0.5 text-[10px] text-slate-400 hover:border-rose-700 hover:text-rose-300";
+        deleteButton.textContent = "Delete";
+        deleteButton.addEventListener(
+          "click",
+          () => {
+            this.deleteUserPreset(preset.id);
+          },
+          { signal: this.abort.signal },
+        );
+        row.append(deleteButton);
+      }
+
+      list.append(row);
+    }
+
+    section.append(list);
+    return section;
+  }
+
+  private saveCurrentPreset(): void {
+    const name = this.presetNameInput?.value.trim() ?? "";
+    if (!name) {
+      if (this.presetStatusEl) {
+        this.presetStatusEl.textContent = "Enter a name to save";
+      }
+      this.presetNameInput?.focus();
+      return;
+    }
+
+    const existingIndex = this.userPresets.findIndex(
+      (preset) => preset.name.toLowerCase() === name.toLowerCase(),
+    );
+
+    const preset: SynthPreset = {
+      id:
+        existingIndex >= 0
+          ? this.userPresets[existingIndex].id
+          : `user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      name: name.slice(0, 48),
+      builtIn: false,
+      params: cloneParams(this.params),
+      effects: cloneEffects(this.effectsParams),
+    };
+
+    if (existingIndex >= 0) {
+      this.userPresets[existingIndex] = preset;
+    } else {
+      this.userPresets.push(preset);
+    }
+
+    this.userPresets.sort((left, right) =>
+      left.name.localeCompare(right.name, undefined, { sensitivity: "base" }),
+    );
+    saveUserPresets(this.userPresets);
+    this.activePresetId = preset.id;
+    this.refreshPresetList();
+
+    if (this.presetStatusEl) {
+      this.presetStatusEl.textContent =
+        existingIndex >= 0 ? `Updated “${preset.name}”` : `Saved “${preset.name}”`;
+    }
+    if (this.presetNameInput) {
+      this.presetNameInput.value = preset.name;
+    }
+  }
+
+  private deleteUserPreset(id: string): void {
+    const preset = this.userPresets.find((entry) => entry.id === id);
+    if (!preset) {
+      return;
+    }
+
+    this.userPresets = this.userPresets.filter((entry) => entry.id !== id);
+    saveUserPresets(this.userPresets);
+    if (this.activePresetId === id) {
+      this.activePresetId = null;
+    }
+    this.refreshPresetList();
+    if (this.presetStatusEl) {
+      this.presetStatusEl.textContent = `Deleted “${preset.name}”`;
+    }
   }
 
   private createKeyboard(): HTMLDivElement {
