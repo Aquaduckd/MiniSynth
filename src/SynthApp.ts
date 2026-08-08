@@ -5416,12 +5416,17 @@ export class SynthApp {
     button.append(noteName);
     this.keyButtons.set(note, button);
 
+    // Resolve note on each event so octave/transpose changes apply to clicks
+    // (computer-keyboard handling already uses noteForLayout at press time).
+    let activeNote: number | null = null;
+
     button.addEventListener(
       "pointerdown",
       (event) => {
         event.preventDefault();
         button.setPointerCapture(event.pointerId);
-        void this.pressKey(note);
+        activeNote = this.noteForLayout(layout);
+        void this.pressKey(activeNote);
       },
       { signal: this.abort.signal },
     );
@@ -5431,14 +5436,20 @@ export class SynthApp {
         if (button.hasPointerCapture(event.pointerId)) {
           button.releasePointerCapture(event.pointerId);
         }
-        this.releaseKey(note);
+        if (activeNote !== null) {
+          this.releaseKey(activeNote);
+          activeNote = null;
+        }
       },
       { signal: this.abort.signal },
     );
     button.addEventListener(
       "pointercancel",
       () => {
-        this.releaseKey(note);
+        if (activeNote !== null) {
+          this.releaseKey(activeNote);
+          activeNote = null;
+        }
       },
       { signal: this.abort.signal },
     );
