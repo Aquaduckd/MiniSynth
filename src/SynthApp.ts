@@ -161,6 +161,40 @@ interface SynthPreset {
 }
 
 const PRESET_STORAGE_KEY = "minisynth.presets.v1";
+const MIDI_SETTINGS_KEY = "minisynth.midi.v1";
+
+interface MidiSettings {
+  /** null = listen on every connected input */
+  enabledInputIds: string[] | null;
+}
+
+function loadMidiSettings(): MidiSettings {
+  try {
+    const raw = localStorage.getItem(MIDI_SETTINGS_KEY);
+    if (!raw) {
+      return { enabledInputIds: null };
+    }
+
+    const parsed = JSON.parse(raw) as Partial<MidiSettings>;
+    if (parsed.enabledInputIds === null) {
+      return { enabledInputIds: null };
+    }
+    if (
+      Array.isArray(parsed.enabledInputIds)
+      && parsed.enabledInputIds.every((id) => typeof id === "string")
+    ) {
+      return { enabledInputIds: parsed.enabledInputIds };
+    }
+  } catch {
+    // ignore corrupt storage
+  }
+
+  return { enabledInputIds: null };
+}
+
+function saveMidiSettings(settings: MidiSettings): void {
+  localStorage.setItem(MIDI_SETTINGS_KEY, JSON.stringify(settings));
+}
 
 function cloneEffects(effects: EffectsParams): EffectsParams {
   return { ...effects };
@@ -2710,6 +2744,9 @@ export class SynthApp {
   private livePreviewFrame: number | null = null;
   private midiAccess: MIDIAccess | null = null;
   private readonly midiBoundInputs = new Set<MIDIInput>();
+  /** null = all connected inputs are enabled */
+  private midiEnabledInputIds: Set<string> | null = null;
+  private midiPermissionError: string | null = null;
   private readonly abort = new AbortController();
   private userPresets: SynthPreset[] = loadUserPresets();
   private presetModal: HTMLElement | null = null;
@@ -2717,6 +2754,12 @@ export class SynthApp {
   private presetNameInput: HTMLInputElement | null = null;
   private presetStatusEl: HTMLElement | null = null;
   private activePresetId: string | null = "init";
+  private configModal: HTMLElement | null = null;
+  private midiStatusEl: HTMLElement | null = null;
+  private midiDeviceListEl: HTMLElement | null = null;
+  private midiEnableButton: HTMLButtonElement | null = null;
+  private midiActivityEl: HTMLElement | null = null;
+  private midiActivityTimer: number | null = null;
 
   mount(container: HTMLElement): void {
     if (this.root) {
@@ -2744,6 +2787,19 @@ export class SynthApp {
     const headerActions = document.createElement("div");
     headerActions.className = "flex shrink-0 items-center gap-2";
 
+    const configButton = document.createElement("button");
+    configButton.type = "button";
+    configButton.className =
+      "rounded border border-slate-700 px-2 py-1 text-[11px] text-slate-300 hover:border-slate-500 hover:text-slate-100";
+    configButton.textContent = "Config";
+    configButton.addEventListener(
+      "click",
+      () => {
+        this.openConfigModal();
+      },
+      { signal: this.abort.signal },
+    );
+
     const presetsButton = document.createElement("button");
     presetsButton.type = "button";
     presetsButton.className =
@@ -2770,7 +2826,7 @@ export class SynthApp {
       { signal: this.abort.signal },
     );
 
-    headerActions.append(presetsButton, resetButton);
+    headerActions.append(configButton, presetsButton, resetButton);
     header.append(headerLabel, headerActions);
 
     this.controlsEl = document.createElement("div");
@@ -2827,7 +2883,7 @@ export class SynthApp {
     this.syncPanelLayout(container.clientWidth, container.clientHeight);
     this.updateVisualizations();
     this.bindKeyboard();
-    this.bindMidi();
+    this.restoreMidiSettings();
     this.bindWindowFocus();
   }
 
@@ -2842,12 +2898,22 @@ export class SynthApp {
     this.layoutObserver?.disconnect();
     this.layoutObserver = null;
     this.unbindMidi();
+    if (this.midiActivityTimer !== null) {
+      window.clearTimeout(this.midiActivityTimer);
+      this.midiActivityTimer = null;
+    }
     this.abort.abort();
     this.presetModal?.remove();
     this.presetModal = null;
     this.presetListEl = null;
     this.presetNameInput = null;
     this.presetStatusEl = null;
+    this.configModal?.remove();
+    this.configModal = null;
+    this.midiStatusEl = null;
+    this.midiDeviceListEl = null;
+    this.midiEnableButton = null;
+    this.midiActivityEl = null;
     this.root?.remove();
     this.root = null;
     this.controlsEl = null;
@@ -4081,6 +4147,260 @@ export class SynthApp {
     this.updateVisualizations();
   }
 
+  private openConfigModal(): void {
+    if (!this.configModal) {
+      this.configModal = this.createConfigModal();
+      document.body.append(this.configModal);
+    }
+
+    this.refreshMidiPanel();
+    this.configModal.classList.remove("hidden");
+    this.configModal.classList.add("flex");
+    this.midiEnableButton?.focus();
+  }
+
+  private closeConfigModal(): void {
+    if (!this.configModal) {
+      return;
+    }
+
+    this.configModal.classList.add("hidden");
+    this.configModal.classList.remove("flex");
+  }
+
+  private createConfigModal(): HTMLElement {
+    const overlay = document.createElement("div");
+    overlay.className =
+      "fixed inset-0 z-50 hidden items-center justify-center bg-slate-950/70 p-4 backdrop-blur-[2px]";
+
+    const dialog = document.createElement("div");
+    dialog.className =
+      "flex max-h-[min(36rem,90vh)] w-full max-w-md flex-col overflow-hidden rounded-lg border border-slate-700 bg-slate-900 shadow-2xl";
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    dialog.setAttribute("aria-label", "Config");
+
+    const header = document.createElement("div");
+    header.className =
+      "flex items-center justify-between gap-3 border-b border-slate-800 px-4 py-3";
+
+    const title = document.createElement("h2");
+    title.className = "text-sm font-medium text-slate-100";
+    title.textContent = "Config";
+
+    const closeButton = document.createElement("button");
+    closeButton.type = "button";
+    closeButton.className =
+      "rounded border border-slate-700 px-2 py-1 text-[11px] text-slate-300 hover:border-slate-500 hover:text-slate-100";
+    closeButton.textContent = "Close";
+    closeButton.addEventListener(
+      "click",
+      () => {
+        this.closeConfigModal();
+      },
+      { signal: this.abort.signal },
+    );
+
+    header.append(title, closeButton);
+
+    const body = document.createElement("div");
+    body.className = "min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-3";
+
+    const midiSection = document.createElement("section");
+    midiSection.className = "space-y-3";
+
+    const midiHeading = document.createElement("div");
+    midiHeading.className = "flex items-center justify-between gap-2";
+
+    const midiTitle = document.createElement("h3");
+    midiTitle.className =
+      "text-[11px] font-medium uppercase tracking-wide text-slate-500";
+    midiTitle.textContent = "MIDI";
+
+    this.midiActivityEl = document.createElement("span");
+    this.midiActivityEl.className =
+      "rounded-full border border-slate-700 px-2 py-0.5 text-[10px] text-slate-500";
+    this.midiActivityEl.textContent = "Idle";
+
+    midiHeading.append(midiTitle, this.midiActivityEl);
+
+    this.midiStatusEl = document.createElement("p");
+    this.midiStatusEl.className = "text-[12px] leading-relaxed text-slate-400";
+
+    const midiActions = document.createElement("div");
+    midiActions.className = "flex flex-wrap items-center gap-2";
+
+    this.midiEnableButton = document.createElement("button");
+    this.midiEnableButton.type = "button";
+    this.midiEnableButton.className =
+      "rounded-md border border-emerald-700/70 bg-emerald-950/40 px-3 py-1.5 text-[11px] font-medium text-emerald-300 hover:border-emerald-500 hover:text-emerald-200 disabled:cursor-not-allowed disabled:opacity-50";
+    this.midiEnableButton.textContent = "Enable MIDI";
+    this.midiEnableButton.addEventListener(
+      "click",
+      () => {
+        void this.requestMidiAccess();
+      },
+      { signal: this.abort.signal },
+    );
+
+    const refreshButton = document.createElement("button");
+    refreshButton.type = "button";
+    refreshButton.className =
+      "rounded-md border border-slate-700 px-3 py-1.5 text-[11px] font-medium text-slate-300 hover:border-slate-500 hover:text-slate-100";
+    refreshButton.textContent = "Refresh";
+    refreshButton.addEventListener(
+      "click",
+      () => {
+        this.syncMidiInputs();
+        this.refreshMidiPanel();
+      },
+      { signal: this.abort.signal },
+    );
+
+    midiActions.append(this.midiEnableButton, refreshButton);
+
+    this.midiDeviceListEl = document.createElement("div");
+    this.midiDeviceListEl.className = "space-y-2";
+
+    const midiHint = document.createElement("p");
+    midiHint.className = "text-[11px] leading-relaxed text-slate-500";
+    midiHint.textContent =
+      "Enable MIDI, then choose which keyboards to listen to. Browsers require permission the first time.";
+
+    midiSection.append(
+      midiHeading,
+      this.midiStatusEl,
+      midiActions,
+      this.midiDeviceListEl,
+      midiHint,
+    );
+    body.append(midiSection);
+    dialog.append(header, body);
+    overlay.append(dialog);
+
+    overlay.addEventListener(
+      "click",
+      (event) => {
+        if (event.target === overlay) {
+          this.closeConfigModal();
+        }
+      },
+      { signal: this.abort.signal },
+    );
+
+    window.addEventListener(
+      "keydown",
+      (event) => {
+        if (event.key !== "Escape") {
+          return;
+        }
+        if (!this.configModal || this.configModal.classList.contains("hidden")) {
+          return;
+        }
+        event.preventDefault();
+        this.closeConfigModal();
+      },
+      { signal: this.abort.signal },
+    );
+
+    return overlay;
+  }
+
+  private refreshMidiPanel(): void {
+    if (!this.midiStatusEl || !this.midiDeviceListEl || !this.midiEnableButton) {
+      return;
+    }
+
+    const supported = Boolean(navigator.requestMIDIAccess);
+    this.midiEnableButton.disabled = !supported || this.midiAccess !== null;
+    this.midiEnableButton.textContent = this.midiAccess
+      ? "MIDI Enabled"
+      : "Enable MIDI";
+
+    if (!supported) {
+      this.midiStatusEl.textContent =
+        "Web MIDI is not supported in this browser. Try Chrome or Edge, or enable MIDI in Firefox.";
+      this.midiDeviceListEl.replaceChildren();
+      return;
+    }
+
+    if (this.midiPermissionError) {
+      this.midiStatusEl.textContent = this.midiPermissionError;
+    } else if (!this.midiAccess) {
+      this.midiStatusEl.textContent =
+        "MIDI is off. Click Enable MIDI to connect a keyboard.";
+    } else {
+      const count = this.midiAccess.inputs.size;
+      this.midiStatusEl.textContent =
+        count === 0
+          ? "MIDI access granted. No input devices found — plug in a keyboard and hit Refresh."
+          : `MIDI access granted. ${count} input${count === 1 ? "" : "s"} available.`;
+    }
+
+    this.midiDeviceListEl.replaceChildren();
+
+    if (!this.midiAccess) {
+      return;
+    }
+
+    const inputs = [...this.midiAccess.inputs.values()].sort((left, right) =>
+      (left.name ?? left.id).localeCompare(right.name ?? right.id),
+    );
+
+    if (inputs.length === 0) {
+      const empty = document.createElement("div");
+      empty.className =
+        "rounded-md border border-dashed border-slate-700 px-3 py-4 text-center text-[12px] text-slate-500";
+      empty.textContent = "No MIDI inputs connected";
+      this.midiDeviceListEl.append(empty);
+      return;
+    }
+
+    for (const input of inputs) {
+      this.midiDeviceListEl.append(this.createMidiDeviceRow(input));
+    }
+  }
+
+  private createMidiDeviceRow(input: MIDIInput): HTMLElement {
+    const row = document.createElement("label");
+    row.className =
+      "flex cursor-pointer items-start gap-3 rounded-md border border-slate-800 bg-slate-950/50 px-3 py-2.5 hover:border-slate-700";
+
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.className = "mt-0.5 accent-emerald-400";
+    checkbox.checked = this.isMidiInputEnabled(input.id);
+    checkbox.addEventListener(
+      "change",
+      () => {
+        this.setMidiInputEnabled(input.id, checkbox.checked);
+      },
+      { signal: this.abort.signal },
+    );
+
+    const text = document.createElement("div");
+    text.className = "min-w-0 flex-1";
+
+    const name = document.createElement("div");
+    name.className = "truncate text-[13px] text-slate-200";
+    name.textContent = input.name?.trim() || "MIDI keyboard";
+
+    const meta = document.createElement("div");
+    meta.className = "truncate text-[11px] text-slate-500";
+    const manufacturer = input.manufacturer?.trim();
+    meta.textContent = [
+      manufacturer || null,
+      input.state,
+      input.connection,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+
+    text.append(name, meta);
+    row.append(checkbox, text);
+    return row;
+  }
+
   private openPresetsModal(): void {
     if (!this.presetModal) {
       this.presetModal = this.createPresetsModal();
@@ -4966,7 +5286,14 @@ export class SynthApp {
     );
   }
 
-  private bindMidi(): void {
+  private restoreMidiSettings(): void {
+    const settings = loadMidiSettings();
+    this.midiEnabledInputIds =
+      settings.enabledInputIds === null
+        ? null
+        : new Set(settings.enabledInputIds);
+
+    // Re-enable quietly if the browser still has permission from a prior visit.
     if (!navigator.requestMIDIAccess) {
       return;
     }
@@ -4977,16 +5304,53 @@ export class SynthApp {
         if (this.abort.signal.aborted) {
           return;
         }
-
-        this.midiAccess = access;
-        this.syncMidiInputs();
-        access.onstatechange = () => {
-          this.syncMidiInputs();
-        };
+        this.attachMidiAccess(access);
+        this.refreshMidiPanel();
       })
       .catch(() => {
-        // Permission denied or MIDI unavailable.
+        // Stay off until the user enables MIDI from Config.
       });
+  }
+
+  private async requestMidiAccess(): Promise<void> {
+    if (!navigator.requestMIDIAccess) {
+      this.midiPermissionError =
+        "Web MIDI is not supported in this browser.";
+      this.refreshMidiPanel();
+      return;
+    }
+
+    if (this.midiEnableButton) {
+      this.midiEnableButton.disabled = true;
+      this.midiEnableButton.textContent = "Requesting…";
+    }
+
+    try {
+      const access = await navigator.requestMIDIAccess();
+      if (this.abort.signal.aborted) {
+        return;
+      }
+      this.midiPermissionError = null;
+      this.attachMidiAccess(access);
+    } catch {
+      this.midiPermissionError =
+        "MIDI permission was denied. Allow MIDI access in the browser, then try again.";
+    }
+
+    this.refreshMidiPanel();
+  }
+
+  private attachMidiAccess(access: MIDIAccess): void {
+    if (this.midiAccess && this.midiAccess !== access) {
+      this.midiAccess.onstatechange = null;
+    }
+
+    this.midiAccess = access;
+    this.syncMidiInputs();
+    access.onstatechange = () => {
+      this.syncMidiInputs();
+      this.refreshMidiPanel();
+    };
   }
 
   private unbindMidi(): void {
@@ -5001,6 +5365,37 @@ export class SynthApp {
     }
   }
 
+  private isMidiInputEnabled(inputId: string): boolean {
+    return (
+      this.midiEnabledInputIds === null
+      || this.midiEnabledInputIds.has(inputId)
+    );
+  }
+
+  private setMidiInputEnabled(inputId: string, enabled: boolean): void {
+    if (!this.midiAccess) {
+      return;
+    }
+
+    if (this.midiEnabledInputIds === null) {
+      this.midiEnabledInputIds = new Set(
+        [...this.midiAccess.inputs.keys()],
+      );
+    }
+
+    if (enabled) {
+      this.midiEnabledInputIds.add(inputId);
+    } else {
+      this.midiEnabledInputIds.delete(inputId);
+    }
+
+    saveMidiSettings({
+      enabledInputIds: [...this.midiEnabledInputIds],
+    });
+    this.syncMidiInputs();
+    this.refreshMidiPanel();
+  }
+
   private syncMidiInputs(): void {
     if (!this.midiAccess) {
       return;
@@ -5008,13 +5403,16 @@ export class SynthApp {
 
     const activeInputs = new Set(this.midiAccess.inputs.values());
     for (const input of this.midiBoundInputs) {
-      if (!activeInputs.has(input)) {
+      if (!activeInputs.has(input) || !this.isMidiInputEnabled(input.id)) {
         input.onmidimessage = null;
         this.midiBoundInputs.delete(input);
       }
     }
 
     for (const input of activeInputs) {
+      if (!this.isMidiInputEnabled(input.id)) {
+        continue;
+      }
       if (this.midiBoundInputs.has(input)) {
         continue;
       }
@@ -5024,6 +5422,29 @@ export class SynthApp {
       };
       this.midiBoundInputs.add(input);
     }
+  }
+
+  private flashMidiActivity(): void {
+    if (!this.midiActivityEl) {
+      return;
+    }
+
+    this.midiActivityEl.textContent = "Note";
+    this.midiActivityEl.className =
+      "rounded-full border border-emerald-700/70 bg-emerald-950/50 px-2 py-0.5 text-[10px] text-emerald-300";
+
+    if (this.midiActivityTimer !== null) {
+      window.clearTimeout(this.midiActivityTimer);
+    }
+    this.midiActivityTimer = window.setTimeout(() => {
+      this.midiActivityTimer = null;
+      if (!this.midiActivityEl) {
+        return;
+      }
+      this.midiActivityEl.textContent = "Idle";
+      this.midiActivityEl.className =
+        "rounded-full border border-slate-700 px-2 py-0.5 text-[10px] text-slate-500";
+    }, 180);
   }
 
   private handleMidiMessage(event: MIDIMessageEvent): void {
@@ -5041,12 +5462,16 @@ export class SynthApp {
       return;
     }
 
+    this.flashMidiActivity();
+
+    const note = Math.min(127, Math.max(0, parsed.note + this.transpose));
+
     if (parsed.type === "noteOn") {
-      void this.pressKey(parsed.note);
+      void this.pressKey(note);
       return;
     }
 
-    this.releaseKey(parsed.note);
+    this.releaseKey(note);
   }
 
   private async pressKey(note: number): Promise<void> {
