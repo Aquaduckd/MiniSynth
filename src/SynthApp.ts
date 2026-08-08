@@ -31,6 +31,7 @@ const MAX_FILTER_Q = 4;
 type OscWaveform = "pulse" | "saw" | "triangle" | "sine";
 type OscId = 0 | 1 | 2;
 type VibratoWaveform = "triangle" | "square";
+type RandomMode = "noise" | "perlin";
 
 const OSC_COUNT = 3;
 
@@ -55,6 +56,9 @@ interface SynthParams {
   vibratoRamp: number;
   vibratoAmount: number;
   vibratoWaveform: VibratoWaveform;
+  randomMode: RandomMode;
+  randomRate: number;
+  randomAmount: number;
 }
 
 interface EffectsParams {
@@ -85,10 +89,15 @@ interface ActiveVoice {
   filter2: BiquadFilterNode;
   vibratoOsc: OscillatorNode;
   vibratoGain: GainNode;
+  randomLfo: AudioWorkletNode;
+  randomGain: GainNode;
   envelope: GainNode;
   baseFrequency: number;
   startTime: number;
+  stopTimer: number | null;
 }
+
+type PitchModTab = "vibrato" | "random";
 
 interface PlotPadding {
   top: number;
@@ -125,6 +134,9 @@ const DEFAULT_PARAMS: SynthParams = {
   vibratoRamp: 0,
   vibratoAmount: vibratoCentsToKnob(20),
   vibratoWaveform: "triangle",
+  randomMode: "noise",
+  randomRate: 4,
+  randomAmount: vibratoCentsToKnob(0),
 };
 
 const MASTER_GAIN = 0.7;
@@ -217,6 +229,10 @@ function isOscWaveform(value: unknown): value is OscWaveform {
 
 function isVibratoWaveform(value: unknown): value is VibratoWaveform {
   return value === "triangle" || value === "square";
+}
+
+function isRandomMode(value: unknown): value is RandomMode {
+  return value === "noise" || value === "perlin";
 }
 
 function normalizeNumber(
@@ -333,6 +349,21 @@ function normalizeStoredPreset(entry: unknown): SynthPreset | null {
     vibratoWaveform: isVibratoWaveform(rawParams.vibratoWaveform)
       ? rawParams.vibratoWaveform
       : DEFAULT_PARAMS.vibratoWaveform,
+    randomMode: isRandomMode(rawParams.randomMode)
+      ? rawParams.randomMode
+      : DEFAULT_PARAMS.randomMode,
+    randomRate: normalizeNumber(
+      rawParams.randomRate,
+      DEFAULT_PARAMS.randomRate,
+      0.1,
+      20,
+    ),
+    randomAmount: normalizeNumber(
+      rawParams.randomAmount,
+      DEFAULT_PARAMS.randomAmount,
+      0,
+      1,
+    ),
   });
 
   const effects = cloneEffects({
@@ -499,6 +530,11 @@ const OSC_WAVEFORM_OPTIONS: { value: OscWaveform; label: string }[] = [
 const VIBRATO_OPTIONS: { value: VibratoWaveform; label: string }[] = [
   { value: "triangle", label: "Triangle" },
   { value: "square", label: "Square" },
+];
+
+const RANDOM_MODE_OPTIONS: { value: RandomMode; label: string }[] = [
+  { value: "noise", label: "Noise" },
+  { value: "perlin", label: "Perlin" },
 ];
 
 const MIN_OCTAVE = 0;
@@ -1605,6 +1641,159 @@ function vibratoWaveformValue(
   }
 }
 
+function clampRandomRate(rate: number): number {
+  return Math.min(20, Math.max(0.1, rate));
+}
+
+function hashNoiseSample(index: number): number {
+  let x = Math.imul(index ^ 0x9e3779b9, 0x85ebca6b) >>> 0;
+  x = Math.imul(x ^ (x >>> 13), 0xc2b2ae35) >>> 0;
+  x = (x ^ (x >>> 16)) >>> 0;
+  return (x / 0xffffffff) * 2 - 1;
+}
+
+function randomModSample(time: number, params: SynthParams): number {
+  const rate = clampRandomRate(params.randomRate);
+  if (params.randomMode === "perlin") {
+    return (
+      perlin1(time * rate * 0.85) * 0.7
+      + perlin1(time * rate * 1.7 + 12.4) * 0.3
+    );
+  }
+
+  // Rougher value noise whose feature rate tracks Rate (amplitude stays ~±1).
+  const x = time * rate * 1.25;
+  const i0 = Math.floor(x);
+  const frac = perlinFade(x - i0);
+  const smooth =
+    hashNoiseSample(i0)
+    + (hashNoiseSample(i0 + 1) - hashNoiseSample(i0)) * frac;
+  const y = time * rate * 3.5;
+  const j0 = Math.floor(y);
+  const gritFrac = y - j0;
+  const grit =
+    hashNoiseSample(j0 + 97)
+    + (hashNoiseSample(j0 + 98) - hashNoiseSample(j0 + 97)) * gritFrac;
+  return Math.max(-1, Math.min(1, smooth * 0.72 + grit * 0.28));
+}
+
+function createPerlinPermutation(seed = 42): Uint8Array {
+  const source = new Uint8Array(256);
+  for (let index = 0; index < 256; index += 1) {
+    source[index] = index;
+  }
+
+  let state = seed >>> 0;
+  for (let index = 255; index > 0; index -= 1) {
+    state = (state * 1664525 + 1013904223) >>> 0;
+    const swap = state % (index + 1);
+    const temp = source[index];
+    source[index] = source[swap];
+    source[swap] = temp;
+  }
+
+  const perm = new Uint8Array(512);
+  for (let index = 0; index < 512; index += 1) {
+    perm[index] = source[index & 255];
+  }
+  return perm;
+}
+
+const PERLIN_PERM = createPerlinPermutation();
+
+function perlinFade(t: number): number {
+  return t * t * t * (t * (t * 6 - 15) + 10);
+}
+
+function perlin1(x: number): number {
+  const xi = Math.floor(x) & 255;
+  const xf = x - Math.floor(x);
+  const u = perlinFade(xf);
+  const a = PERLIN_PERM[xi];
+  const b = PERLIN_PERM[xi + 1];
+  const gradA = (a & 1) === 0 ? xf : -xf;
+  const gradB = (b & 1) === 0 ? xf - 1 : -(xf - 1);
+  return gradA + u * (gradB - gradA);
+}
+
+function drawRandomPreview(
+  canvas: HTMLCanvasElement,
+  params: SynthParams,
+  theme: PanelTheme,
+  playhead: NotePlayheadState | null = null,
+): void {
+  const setup = setupCanvas(canvas);
+  if (!setup) {
+    return;
+  }
+
+  const { ctx, width, height } = setup;
+  const pad: PlotPadding = { top: 16, right: 12, bottom: 22, left: 12 };
+  const plotW = width - pad.left - pad.right;
+  const plotH = height - pad.top - pad.bottom;
+  const midY = pad.top + plotH / 2;
+  const maxAmplitude = plotH / 2 - 6;
+  const amplitude = vibratoDepthPreviewScale(params.randomAmount) * maxAmplitude;
+  const windowDuration = 1.5;
+  // Pin the caret at the left edge and scroll the modulation under it,
+  // matching vibrato's post-delay playhead behavior.
+  const windowStart = playhead ? playhead.vibratoTime : 0;
+  const samples = Math.max(160, Math.floor(plotW));
+
+  // Pure time-scaled modulation (Rate → temporal frequency only). Skip the
+  // audio lowpass here so Rate can't masquerade as amplitude in the preview.
+  ctx.clearRect(0, 0, width, height);
+
+  ctx.strokeStyle = "#1e293b";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(pad.left, midY);
+  ctx.lineTo(width - pad.right, midY);
+  ctx.stroke();
+
+  ctx.strokeStyle = theme.accent;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (let index = 0; index <= samples; index += 1) {
+    const time = windowStart + (index / samples) * windowDuration;
+    const x = pad.left + (index / samples) * plotW;
+    const y = midY - randomModSample(time, params) * amplitude;
+    if (index === 0) {
+      ctx.moveTo(x, y);
+    } else {
+      ctx.lineTo(x, y);
+    }
+  }
+  ctx.stroke();
+
+  ctx.fillStyle = "#64748b";
+  ctx.font = "500 10px system-ui, sans-serif";
+  ctx.fillText(
+    params.randomMode === "perlin" ? "Perlin" : "Noise",
+    pad.left,
+    12,
+  );
+  ctx.fillStyle = "#475569";
+  ctx.font = "500 9px ui-monospace, monospace";
+  ctx.textAlign = "right";
+  ctx.fillText(
+    `${params.randomMode} · ${params.randomRate.toFixed(1)} Hz · ${formatVibratoDepth(params.randomAmount)}`,
+    width - pad.right,
+    12,
+  );
+  ctx.textAlign = "start";
+
+  if (playhead) {
+    drawTimelinePlayhead(
+      ctx,
+      pad.left,
+      pad.top,
+      pad.top + plotH,
+      "#64748b",
+    );
+  }
+}
+
 class SimpleSynth {
   private context: AudioContext | null = null;
   private output: GainNode | null = null;
@@ -1623,6 +1812,8 @@ class SimpleSynth {
   private readonly pulseReal = new Float32Array(HARMONICS);
   private readonly pulseImag = new Float32Array(HARMONICS);
   private readonly pulseWaves: Array<PeriodicWave | null> = [null, null, null];
+  private workletLoading: Promise<void> | null = null;
+  private workletReady = false;
   private params: SynthParams = cloneParams(DEFAULT_PARAMS);
   private effectsParams: EffectsParams = { ...DEFAULT_EFFECTS };
   private previewChangeHandler: (() => void) | null = null;
@@ -1690,6 +1881,10 @@ class SimpleSynth {
       || params.vibratoWaveform !== previous.vibratoWaveform;
     const vibratoWaveformChanged =
       params.vibratoWaveform !== previous.vibratoWaveform;
+    const randomChanged =
+      params.randomMode !== previous.randomMode
+      || params.randomRate !== previous.randomRate
+      || params.randomAmount !== previous.randomAmount;
 
     this.params = cloneParams(params);
 
@@ -1726,6 +1921,9 @@ class SimpleSynth {
       }
       if (vibratoWaveformChanged && this.context) {
         this.configureVibratoOsc(voice.vibratoOsc);
+      }
+      if (randomChanged) {
+        this.applyRandomMod(voice);
       }
     }
   }
@@ -1913,6 +2111,8 @@ class SimpleSynth {
       for (let osc = 0; osc < OSC_COUNT; osc += 1) {
         this.updatePulseWave(osc as OscId);
       }
+      this.workletLoading = null;
+      this.workletReady = false;
     }
 
     if (this.context.state === "suspended") {
@@ -1920,6 +2120,22 @@ class SimpleSynth {
     }
 
     return this.context;
+  }
+
+  private async ensureRandomWorklet(context: AudioContext): Promise<void> {
+    if (this.workletReady) {
+      return;
+    }
+
+    if (!this.workletLoading) {
+      this.workletLoading = context.audioWorklet
+        .addModule(new URL("./random-lfo-worklet.js", import.meta.url))
+        .then(() => {
+          this.workletReady = true;
+        });
+    }
+
+    await this.workletLoading;
   }
 
   private initEffectsChain(context: AudioContext): void {
@@ -2035,6 +2251,8 @@ class SimpleSynth {
     this.masterGain = null;
     this.effectsReady = false;
     this.pulseWaves.fill(null);
+    this.workletLoading = null;
+    this.workletReady = false;
   }
 
   private async startNote(note: number): Promise<void> {
@@ -2045,6 +2263,15 @@ class SimpleSynth {
     this.pendingStarts.add(note);
     try {
       const context = await this.ensureRunning();
+      if (
+        !this.output ||
+        this.voices.has(note) ||
+        !this.heldNotes.has(note)
+      ) {
+        return;
+      }
+
+      await this.ensureRandomWorklet(context);
       if (
         !this.output ||
         this.voices.has(note) ||
@@ -2078,6 +2305,15 @@ class SimpleSynth {
       const vibratoGain = context.createGain();
       vibratoGain.gain.setValueAtTime(0, now);
 
+      const randomLfo = new AudioWorkletNode(context, "random-lfo", {
+        numberOfInputs: 0,
+        numberOfOutputs: 1,
+        outputChannelCount: [1],
+      });
+
+      const randomGain = context.createGain();
+      randomGain.gain.value = 0;
+
       for (let osc = 0; osc < OSC_COUNT; osc += 1) {
         const oscFrequency = oscTunedFrequency(
           baseFrequency,
@@ -2092,6 +2328,7 @@ class SimpleSynth {
         oscillator.connect(oscGain);
         oscGain.connect(mixGain);
         vibratoGain.connect(oscillator.frequency);
+        randomGain.connect(oscillator.frequency);
 
         oscillators.push(oscillator);
         oscGains.push(oscGain);
@@ -2102,6 +2339,7 @@ class SimpleSynth {
       filter2.connect(envelope);
       envelope.connect(this.output);
       vibratoOsc.connect(vibratoGain);
+      randomLfo.connect(randomGain);
 
       const voice: ActiveVoice = {
         oscillators,
@@ -2111,9 +2349,12 @@ class SimpleSynth {
         filter2,
         vibratoOsc,
         vibratoGain,
+        randomLfo,
+        randomGain,
         envelope,
         baseFrequency,
         startTime: now,
+        stopTimer: null,
       };
 
       if (!this.heldNotes.has(note)) {
@@ -2124,6 +2365,7 @@ class SimpleSynth {
       this.applyMixLevels(voice);
       this.scheduleAttack(envelope, now);
       this.applyVibrato(voice);
+      this.applyRandomMod(voice);
 
       for (const oscillator of oscillators) {
         oscillator.start(now);
@@ -2140,8 +2382,15 @@ class SimpleSynth {
   }
 
   private discardVoice(voice: ActiveVoice): void {
+    if (voice.stopTimer !== null) {
+      window.clearTimeout(voice.stopTimer);
+      voice.stopTimer = null;
+    }
     voice.vibratoGain.disconnect();
     voice.vibratoOsc.disconnect();
+    voice.randomGain.disconnect();
+    voice.randomLfo.port.postMessage({ type: "stop" });
+    voice.randomLfo.disconnect();
     for (let osc = 0; osc < OSC_COUNT; osc += 1) {
       voice.oscillators[osc].disconnect();
       voice.oscGains[osc].disconnect();
@@ -2174,6 +2423,13 @@ class SimpleSynth {
       oscillator.stop(stopAt);
     }
     voice.vibratoOsc.stop(stopAt);
+    const delayMs = Math.max(0, (stopAt - now) * 1000);
+    voice.stopTimer = window.setTimeout(() => {
+      voice.stopTimer = null;
+      voice.randomLfo.port.postMessage({ type: "stop" });
+      voice.randomLfo.disconnect();
+      voice.randomGain.disconnect();
+    }, delayMs);
   }
 
   private scheduleAttack(envelope: GainNode, now: number): void {
@@ -2307,6 +2563,24 @@ class SimpleSynth {
     return baseFrequency * (2 ** (cents / 1200) - 1);
   }
 
+  private randomDepthHz(baseFrequency: number): number {
+    const cents = vibratoDepthCents(this.params.randomAmount);
+    return baseFrequency * (2 ** (cents / 1200) - 1);
+  }
+
+  private applyRandomMod(voice: ActiveVoice): void {
+    voice.randomLfo.port.postMessage({
+      type: "params",
+      mode: this.params.randomMode,
+    });
+    const rateParam = voice.randomLfo.parameters.get("rate");
+    if (rateParam) {
+      rateParam.value = clampRandomRate(this.params.randomRate);
+    }
+    // Worklet outputs ~±1; scale to depth in Hz.
+    voice.randomGain.gain.value = this.randomDepthHz(voice.baseFrequency);
+  }
+
   private configureOscillator(
     oscillator: OscillatorNode,
     osc: OscId,
@@ -2426,6 +2700,10 @@ export class SynthApp {
   ];
   private oscWidthKnobElements = new Map<OscId, HTMLElement>();
   private vibratoButtons = new Map<VibratoWaveform, HTMLButtonElement>();
+  private randomModeButtons = new Map<RandomMode, HTMLButtonElement>();
+  private activePitchModTab: PitchModTab = "vibrato";
+  private pitchModTabButtons = new Map<PitchModTab, HTMLButtonElement>();
+  private pitchModTabPanels = new Map<PitchModTab, HTMLElement>();
   private paramKnobs = new Map<string, RotaryKnobHandle>();
   private effectKnobs = new Map<keyof EffectsParams, RotaryKnobHandle>();
   private vizObserver: ResizeObserver | null = null;
@@ -2588,6 +2866,9 @@ export class SynthApp {
     }
     this.oscWidthKnobElements.clear();
     this.vibratoButtons.clear();
+    this.randomModeButtons.clear();
+    this.pitchModTabButtons.clear();
+    this.pitchModTabPanels.clear();
     this.paramKnobs.clear();
     this.effectKnobs.clear();
     this.keyButtons.clear();
@@ -2663,14 +2944,7 @@ export class SynthApp {
         playhead,
       );
     }
-    if (this.vibratoCanvas) {
-      drawVibratoPreview(
-        this.vibratoCanvas,
-        this.params,
-        SECTION_THEMES.vibrato,
-        playhead,
-      );
-    }
+    this.updatePitchModPreview(playhead);
     this.updateMasterPreview();
     this.syncLivePreviewLoop();
   }
@@ -2694,15 +2968,31 @@ export class SynthApp {
         playhead,
       );
     }
-    if (this.vibratoCanvas) {
-      drawVibratoPreview(
+    this.updatePitchModPreview(playhead);
+    this.updateMasterPreview();
+  }
+
+  private updatePitchModPreview(playhead: NotePlayheadState | null): void {
+    if (!this.vibratoCanvas) {
+      return;
+    }
+
+    if (this.activePitchModTab === "random") {
+      drawRandomPreview(
         this.vibratoCanvas,
         this.params,
         SECTION_THEMES.vibrato,
         playhead,
       );
+      return;
     }
-    this.updateMasterPreview();
+
+    drawVibratoPreview(
+      this.vibratoCanvas,
+      this.params,
+      SECTION_THEMES.vibrato,
+      playhead,
+    );
   }
 
   private updateMasterPreview(): void {
@@ -2979,7 +3269,7 @@ export class SynthApp {
   private createOscTabPanel(osc: OscId): HTMLElement {
     const panel = document.createElement("div");
     panel.className =
-      "flex shrink-0 flex-nowrap items-end justify-start gap-2 p-3";
+      "flex shrink-0 flex-nowrap items-end justify-center gap-2 p-3";
     panel.style.minWidth = `${OSC_MODULE_MIN_WIDTH}px`;
     panel.setAttribute("role", "tabpanel");
     panel.dataset.oscPanel = String(osc);
@@ -3130,15 +3420,70 @@ export class SynthApp {
   }
 
   private createVibratoSection(): HTMLElement {
-    const section = this.createSection("Vibrato");
+    const section = document.createElement("section");
+    section.className =
+      "flex min-h-0 w-full shrink-0 flex-col overflow-hidden rounded-lg border border-slate-800 bg-slate-900/40";
+    section.style.minWidth = `${VIBRATO_CONTROLS_MIN_WIDTH}px`;
+
+    const heading = document.createElement("div");
+    heading.className =
+      "flex items-center justify-between gap-2 border-b border-slate-800 px-3 py-2";
+
+    const title = document.createElement("div");
+    title.className =
+      "text-xs font-medium uppercase tracking-wide text-slate-400";
+    title.textContent = "Pitch Mod";
+
+    const tabs = document.createElement("div");
+    tabs.className = "flex items-center gap-1";
+    tabs.setAttribute("role", "tablist");
+    tabs.setAttribute("aria-label", "Pitch modulation");
+
+    for (const tabId of ["vibrato", "random"] as PitchModTab[]) {
+      const tab = document.createElement("button");
+      tab.type = "button";
+      tab.setAttribute("role", "tab");
+      tab.textContent = tabId === "vibrato" ? "Vibrato" : "Random";
+      tab.className =
+        "rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors";
+      tab.addEventListener(
+        "click",
+        () => {
+          this.setActivePitchModTab(tabId);
+        },
+        { signal: this.abort.signal },
+      );
+      this.pitchModTabButtons.set(tabId, tab);
+      tabs.append(tab);
+    }
+
+    heading.append(title, tabs);
 
     this.vibratoCanvas = document.createElement("canvas");
     this.vibratoCanvas.className = CANVAS_PREVIEW_CLASS;
 
+    const body = document.createElement("div");
+    body.className = "relative";
+
+    const vibratoPanel = this.createVibratoTabPanel();
+    const randomPanel = this.createRandomTabPanel();
+    this.pitchModTabPanels.set("vibrato", vibratoPanel);
+    this.pitchModTabPanels.set("random", randomPanel);
+    body.append(vibratoPanel, randomPanel);
+
+    section.append(heading, this.vibratoCanvas, body);
+    this.setActivePitchModTab(this.activePitchModTab);
+    this.updateVibratoWaveformButtons();
+    this.updateRandomModeButtons();
+    return section;
+  }
+
+  private createVibratoTabPanel(): HTMLElement {
     const controlsRow = document.createElement("div");
     controlsRow.className =
-      "flex shrink-0 flex-nowrap items-end justify-between gap-2 p-3";
+      "flex shrink-0 flex-nowrap items-end justify-center gap-2 p-3";
     controlsRow.style.minWidth = `${VIBRATO_CONTROLS_MIN_WIDTH}px`;
+    controlsRow.setAttribute("role", "tabpanel");
 
     const knobValueSpacer = document.createElement("span");
     knobValueSpacer.className =
@@ -3201,10 +3546,88 @@ export class SynthApp {
     );
 
     controlsRow.append(waveformGroup, knobsGroup);
-    section.append(this.vibratoCanvas, controlsRow);
+    return controlsRow;
+  }
 
-    this.updateVibratoWaveformButtons();
-    return section;
+  private createRandomTabPanel(): HTMLElement {
+    const controlsRow = document.createElement("div");
+    controlsRow.className =
+      "flex shrink-0 flex-nowrap items-end justify-center gap-2 p-3";
+    controlsRow.style.minWidth = `${VIBRATO_CONTROLS_MIN_WIDTH}px`;
+    controlsRow.setAttribute("role", "tabpanel");
+
+    const knobValueSpacer = document.createElement("span");
+    knobValueSpacer.className =
+      "pointer-events-none font-mono text-[9px] leading-none invisible select-none";
+    knobValueSpacer.textContent = "100%";
+    knobValueSpacer.setAttribute("aria-hidden", "true");
+
+    const modeGroup = document.createElement("div");
+    modeGroup.className = "flex shrink-0 flex-col items-center gap-0.5";
+
+    const modeButtons = document.createElement("div");
+    modeButtons.className = "flex flex-col gap-1";
+
+    for (const option of RANDOM_MODE_OPTIONS) {
+      const button = this.createOscWaveformButton(option.label, () => {
+        this.setRandomMode(option.value);
+      });
+      this.randomModeButtons.set(option.value, button);
+      modeButtons.append(button);
+    }
+
+    const modeLabel = document.createElement("span");
+    modeLabel.className =
+      "text-[9px] font-medium uppercase tracking-wide text-slate-500";
+    modeLabel.textContent = "Mode";
+    modeGroup.append(knobValueSpacer, modeButtons, modeLabel);
+
+    const knobsGroup = document.createElement("div");
+    knobsGroup.className = "flex shrink-0 flex-nowrap items-start gap-2";
+    knobsGroup.append(
+      this.createParamKnob(
+        "Rate",
+        "randomRate",
+        0.1,
+        20,
+        0.1,
+        (value) => `${value.toFixed(1)} Hz`,
+        "vibrato",
+      ),
+      this.createRandomDepthKnob(),
+    );
+
+    controlsRow.append(modeGroup, knobsGroup);
+    return controlsRow;
+  }
+
+  private setActivePitchModTab(tab: PitchModTab): void {
+    this.activePitchModTab = tab;
+    const theme = SECTION_THEMES.vibrato;
+
+    for (const [id, button] of this.pitchModTabButtons) {
+      const active = id === tab;
+      button.setAttribute("aria-selected", active ? "true" : "false");
+      if (active) {
+        button.className =
+          "rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors";
+        button.style.borderColor = `${theme.accent}99`;
+        button.style.backgroundColor = theme.accentFill;
+        button.style.color = theme.accentBright;
+      } else {
+        button.className =
+          "rounded-md border border-slate-700 bg-slate-900/60 px-2 py-0.5 text-[11px] font-medium text-slate-400 transition-colors hover:border-slate-600 hover:text-slate-200";
+        button.style.borderColor = "";
+        button.style.backgroundColor = "";
+        button.style.color = "";
+      }
+    }
+
+    for (const [id, panel] of this.pitchModTabPanels) {
+      panel.classList.toggle("hidden", id !== tab);
+    }
+
+    this.updateVisualizations();
   }
 
   private setVibratoWaveform(waveform: VibratoWaveform): void {
@@ -3218,17 +3641,29 @@ export class SynthApp {
     this.updateVisualizations();
   }
 
-  private updateVibratoWaveformButtons(): void {
+  private setRandomMode(mode: RandomMode): void {
+    if (this.params.randomMode === mode) {
+      return;
+    }
+
+    this.params.randomMode = mode;
+    this.synth.setParams(this.params);
+    this.updateRandomModeButtons();
+    this.updateVisualizations();
+  }
+
+  private updatePitchModOptionButtons(
+    buttons: Map<string, HTMLButtonElement>,
+    activeValue: string,
+  ): void {
     const theme = SECTION_THEMES.vibrato;
     const inactiveClass =
       "w-16 rounded-md border border-slate-700 bg-slate-900/60 px-2 py-1 text-[11px] font-medium text-slate-400 transition-colors hover:border-slate-600 hover:text-slate-200";
     const baseClass =
       "w-16 rounded-md border px-2 py-1 text-[11px] font-medium transition-colors";
 
-    const applyState = (
-      button: HTMLButtonElement,
-      active: boolean,
-    ): void => {
+    for (const [value, button] of buttons) {
+      const active = value === activeValue;
       if (active) {
         button.className = baseClass;
         button.style.borderColor = `${theme.accent}99`;
@@ -3240,11 +3675,21 @@ export class SynthApp {
         button.style.backgroundColor = "";
         button.style.color = "";
       }
-    };
-
-    for (const [waveform, button] of this.vibratoButtons) {
-      applyState(button, this.params.vibratoWaveform === waveform);
     }
+  }
+
+  private updateVibratoWaveformButtons(): void {
+    this.updatePitchModOptionButtons(
+      this.vibratoButtons,
+      this.params.vibratoWaveform,
+    );
+  }
+
+  private updateRandomModeButtons(): void {
+    this.updatePitchModOptionButtons(
+      this.randomModeButtons,
+      this.params.randomMode,
+    );
   }
 
   private createDelayPedal(): HTMLElement {
@@ -3515,6 +3960,30 @@ export class SynthApp {
     return knob.element;
   }
 
+  private createRandomDepthKnob(): HTMLElement {
+    const knob = createRotaryKnob({
+      label: "Depth",
+      min: 0,
+      max: 1,
+      step: 0.01,
+      value: snapVibratoDepthKnob(this.params.randomAmount),
+      format: formatVibratoDepth,
+      ...this.themeKnobOptions("vibrato"),
+      onChange: (value) => {
+        const snapped = snapVibratoDepthKnob(value);
+        if (snapped !== value) {
+          knob.setValue(snapped);
+        }
+        this.params = { ...this.params, randomAmount: snapped };
+        this.synth.setParams(this.params);
+        this.updateVisualizations();
+      },
+    });
+
+    this.paramKnobs.set("randomAmount", knob);
+    return knob.element;
+  }
+
   private createParamKnob(
     label: string,
     key: {
@@ -3586,7 +4055,7 @@ export class SynthApp {
         continue;
       }
 
-      if (key === "vibratoAmount") {
+      if (key === "vibratoAmount" || key === "randomAmount") {
         knob.setValue(snapVibratoDepthKnob(value));
         continue;
       }
@@ -3604,8 +4073,10 @@ export class SynthApp {
     }
 
     this.setActiveOscTab(0);
+    this.setActivePitchModTab(this.activePitchModTab);
     this.updateOscWaveformButtons();
     this.updateVibratoWaveformButtons();
+    this.updateRandomModeButtons();
     this.updateWidthKnobVisibility();
     this.updateVisualizations();
   }
