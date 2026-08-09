@@ -2906,6 +2906,8 @@ export class SynthApp {
   private params: SynthParams = cloneParams(DEFAULT_PARAMS);
   private effectsParams: EffectsParams = { ...DEFAULT_EFFECTS };
   private pressedKeys = new Set<number>();
+  /** Computer keyCode → MIDI note at press time (survives octave/transpose changes). */
+  private heldComputerKeys = new Map<string, number>();
   private keyButtons = new Map<number, HTMLButtonElement>();
   private keyboardEnabled = false;
   private octave = DEFAULT_OCTAVE;
@@ -5582,6 +5584,13 @@ export class SynthApp {
     }
 
     this.keyButtons = nextButtons;
+    this.syncKeyboardPressedVisuals();
+  }
+
+  private syncKeyboardPressedVisuals(): void {
+    for (const [note, button] of this.keyButtons) {
+      this.setKeyPressed(button, this.pressedKeys.has(note));
+    }
   }
 
   private baseMidiNote(): number {
@@ -5642,7 +5651,6 @@ export class SynthApp {
       return;
     }
 
-    this.releaseAllKeys();
     this.octave = clamped;
     if (this.octaveLabel) {
       this.octaveLabel.textContent = this.formatOctaveLabel();
@@ -5657,7 +5665,6 @@ export class SynthApp {
       return;
     }
 
-    this.releaseAllKeys();
     this.transpose = clamped;
     if (this.transposeLabel) {
       this.transposeLabel.textContent = this.formatTransposeLabel();
@@ -5783,11 +5790,16 @@ export class SynthApp {
           return;
         }
 
+        if (this.heldComputerKeys.has(event.code)) {
+          return;
+        }
+
         const note = this.noteForKeyCode(event.code);
         if (note === undefined) {
           return;
         }
 
+        this.heldComputerKeys.set(event.code, note);
         void this.pressKey(note);
       },
       keyboardOptions,
@@ -5796,21 +5808,18 @@ export class SynthApp {
     window.addEventListener(
       "keyup",
       (event) => {
-        if (!this.shouldHandleKeyboard(event)) {
-          return;
-        }
         if (!this.isCapturedKeyCode(event.code)) {
           return;
         }
 
-        this.suppressBrowserKey(event);
-
-        const note = this.noteForKeyCode(event.code);
-        if (note === undefined) {
+        const heldNote = this.heldComputerKeys.get(event.code);
+        if (heldNote === undefined) {
           return;
         }
 
-        this.releaseKey(note);
+        this.suppressBrowserKey(event);
+        this.heldComputerKeys.delete(event.code);
+        this.releaseKey(heldNote);
       },
       keyboardOptions,
     );
@@ -6033,6 +6042,7 @@ export class SynthApp {
   }
 
   private releaseManualKeys(): void {
+    this.heldComputerKeys.clear();
     for (const note of [...this.pressedKeys]) {
       if (this.midiFileHoldCounts.has(note)) {
         continue;
@@ -6045,6 +6055,7 @@ export class SynthApp {
 
   private releaseAllKeys(): void {
     this.stopMidiFile();
+    this.heldComputerKeys.clear();
     for (const note of this.pressedKeys) {
       this.setKeyPressed(this.keyButtons.get(note), false);
     }
