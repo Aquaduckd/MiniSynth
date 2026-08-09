@@ -5542,10 +5542,12 @@ export class SynthApp {
     const midiTransport = document.createElement("div");
     midiTransport.className = "flex min-w-0 items-center gap-1.5";
     midiTransport.append(
+      loadButton,
       this.midiFilePlayStopButton,
       this.midiFileBackButton,
       this.midiFileForwardButton,
       this.midiFileTimeEl,
+      this.midiFileInput,
     );
 
     const chordCenter = document.createElement("div");
@@ -5560,8 +5562,8 @@ export class SynthApp {
     chordCenter.append(this.chordLabelEl);
 
     const midiMeta = document.createElement("div");
-    midiMeta.className = "flex min-w-0 items-center justify-end gap-1.5";
-    midiMeta.append(this.midiFileStatusEl, loadButton, this.midiFileInput);
+    midiMeta.className = "flex min-w-0 items-center justify-end";
+    midiMeta.append(this.midiFileStatusEl);
 
     chordBar.append(midiTransport, chordCenter, midiMeta);
 
