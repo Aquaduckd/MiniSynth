@@ -73,8 +73,12 @@ interface EffectsParams {
   masterVolume: number;
 }
 
+type PianoRollStyle = "compact" | "full88";
+
 interface KeyLayout {
   semitone: number;
+  /** Absolute MIDI note for full 88-key layout; omit for octave-relative compact keys. */
+  midiNote?: number;
   label: string;
   keyCode?: string;
   white: boolean;
@@ -163,11 +167,20 @@ interface SynthPreset {
 
 const PRESET_STORAGE_KEY = "minisynth.presets.v1";
 const MIDI_SETTINGS_KEY = "minisynth.midi.v1";
+const UI_SETTINGS_KEY = "minisynth.ui.v1";
 
 interface MidiSettings {
   /** null = listen on every connected input */
   enabledInputIds: string[] | null;
 }
+
+interface UiSettings {
+  pianoRollStyle: PianoRollStyle;
+}
+
+const DEFAULT_UI_SETTINGS: UiSettings = {
+  pianoRollStyle: "compact",
+};
 
 function loadMidiSettings(): MidiSettings {
   try {
@@ -195,6 +208,26 @@ function loadMidiSettings(): MidiSettings {
 
 function saveMidiSettings(settings: MidiSettings): void {
   localStorage.setItem(MIDI_SETTINGS_KEY, JSON.stringify(settings));
+}
+
+function loadUiSettings(): UiSettings {
+  try {
+    const raw = localStorage.getItem(UI_SETTINGS_KEY);
+    if (!raw) {
+      return { ...DEFAULT_UI_SETTINGS };
+    }
+    const parsed = JSON.parse(raw) as Partial<UiSettings>;
+    if (parsed.pianoRollStyle === "compact" || parsed.pianoRollStyle === "full88") {
+      return { pianoRollStyle: parsed.pianoRollStyle };
+    }
+  } catch {
+    // ignore corrupt storage
+  }
+  return { ...DEFAULT_UI_SETTINGS };
+}
+
+function saveUiSettings(settings: UiSettings): void {
+  localStorage.setItem(UI_SETTINGS_KEY, JSON.stringify(settings));
 }
 
 function cloneEffects(effects: EffectsParams): EffectsParams {
@@ -611,6 +644,19 @@ const KEY_LAYOUT: KeyLayout[] = [
   { semitone: 17, label: "F", keyCode: "Quote", white: true, whiteIndex: 10, tier: "upper" },
 ];
 
+const FULL88_MIDI_MIN = 21;
+const FULL88_MIDI_MAX = 108;
+
+const PIANO_ROLL_STYLE_OPTIONS: { value: PianoRollStyle; label: string }[] = [
+  { value: "compact", label: "Compact" },
+  { value: "full88", label: "Full 88-key" },
+];
+
+function isPianoWhiteNote(note: number): boolean {
+  const pitch = ((note % 12) + 12) % 12;
+  return pitch !== 1 && pitch !== 3 && pitch !== 6 && pitch !== 8 && pitch !== 10;
+}
+
 /** Firefox Quick Find: `/` searches text, `'` searches links. */
 const BROWSER_FIND_KEY_CODES = new Set(["Quote"]);
 
@@ -730,6 +776,29 @@ function midiNoteLabel(note: number): string {
   const octave = Math.floor(note / 12) - 1;
   return `${PITCH_CLASS_NAMES[pitch]}${octave}`;
 }
+
+function buildFull88Layout(): KeyLayout[] {
+  const layouts: KeyLayout[] = [];
+  let whiteIndex = 0;
+  for (let midiNote = FULL88_MIDI_MIN; midiNote <= FULL88_MIDI_MAX; midiNote += 1) {
+    const white = isPianoWhiteNote(midiNote);
+    layouts.push({
+      semitone: midiNote - FULL88_MIDI_MIN,
+      midiNote,
+      label: midiNoteLabel(midiNote),
+      white,
+      whiteIndex: white ? whiteIndex : undefined,
+      tier: "main",
+    });
+    if (white) {
+      whiteIndex += 1;
+    }
+  }
+  return layouts;
+}
+
+const FULL88_LAYOUT: KeyLayout[] = buildFull88Layout();
+const FULL88_WHITE_COUNT = FULL88_LAYOUT.filter((item) => item.white).length;
 
 function pitchClassName(pitchClass: number): string {
   return PITCH_CLASS_NAMES[((pitchClass % 12) + 12) % 12];
@@ -2918,6 +2987,8 @@ export class SynthApp {
   private heldComputerKeys = new Map<string, number>();
   private keyButtons = new Map<number, HTMLButtonElement>();
   private keyboardEnabled = false;
+  private pianoRollStyle: PianoRollStyle = DEFAULT_UI_SETTINGS.pianoRollStyle;
+  private pianoRollStyleSelect: HTMLSelectElement | null = null;
   private octave = DEFAULT_OCTAVE;
   private transpose = DEFAULT_TRANSPOSE;
   private keyboardBoard: HTMLDivElement | null = null;
@@ -3096,6 +3167,7 @@ export class SynthApp {
 
     this.controlsEl.append(moduleGrid);
 
+    this.restoreUiSettings();
     this.keyboardWrapper = this.createKeyboard();
 
     this.root.append(header, this.controlsEl, this.keyboardWrapper);
@@ -3134,6 +3206,7 @@ export class SynthApp {
     this.presetStatusEl = null;
     this.configModal?.remove();
     this.configModal = null;
+    this.pianoRollStyleSelect = null;
     this.midiStatusEl = null;
     this.midiDeviceListEl = null;
     this.midiEnableButton = null;
@@ -4424,6 +4497,9 @@ export class SynthApp {
     }
 
     this.refreshMidiPanel();
+    if (this.pianoRollStyleSelect) {
+      this.pianoRollStyleSelect.value = this.pianoRollStyle;
+    }
     this.configModal.classList.remove("hidden");
     this.configModal.classList.add("flex");
     this.midiEnableButton?.focus();
@@ -4475,6 +4551,50 @@ export class SynthApp {
 
     const body = document.createElement("div");
     body.className = "min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-3";
+
+    const pianoSection = document.createElement("section");
+    pianoSection.className = "space-y-3";
+
+    const pianoTitle = document.createElement("h3");
+    pianoTitle.className =
+      "text-[11px] font-medium uppercase tracking-wide text-slate-500";
+    pianoTitle.textContent = "Piano Roll";
+
+    const pianoField = document.createElement("label");
+    pianoField.className = "flex flex-col gap-1.5";
+
+    const pianoFieldLabel = document.createElement("span");
+    pianoFieldLabel.className = "text-[12px] text-slate-300";
+    pianoFieldLabel.textContent = "Style";
+
+    this.pianoRollStyleSelect = document.createElement("select");
+    this.pianoRollStyleSelect.className =
+      "rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-[12px] text-slate-100 outline-none hover:border-slate-500 focus:border-teal-600";
+    for (const option of PIANO_ROLL_STYLE_OPTIONS) {
+      const item = document.createElement("option");
+      item.value = option.value;
+      item.textContent = option.label;
+      this.pianoRollStyleSelect.append(item);
+    }
+    this.pianoRollStyleSelect.value = this.pianoRollStyle;
+    this.pianoRollStyleSelect.addEventListener(
+      "change",
+      () => {
+        const value = this.pianoRollStyleSelect?.value;
+        if (value === "compact" || value === "full88") {
+          this.setPianoRollStyle(value);
+        }
+      },
+      { signal: this.abort.signal },
+    );
+
+    const pianoHint = document.createElement("p");
+    pianoHint.className = "text-[11px] leading-relaxed text-slate-500";
+    pianoHint.textContent =
+      "Compact is the computer-keyboard layout. Full 88-key shows A0–C8 for MIDI controllers and files.";
+
+    pianoField.append(pianoFieldLabel, this.pianoRollStyleSelect);
+    pianoSection.append(pianoTitle, pianoField, pianoHint);
 
     const midiSection = document.createElement("section");
     midiSection.className = "space-y-3";
@@ -4544,7 +4664,7 @@ export class SynthApp {
       this.midiDeviceListEl,
       midiHint,
     );
-    body.append(midiSection);
+    body.append(pianoSection, midiSection);
     dialog.append(header, body);
     overlay.append(dialog);
 
@@ -5686,6 +5806,27 @@ export class SynthApp {
       "font-mono text-xs tabular-nums tracking-wide text-teal-300";
   }
 
+  private activeKeyLayout(): KeyLayout[] {
+    return this.pianoRollStyle === "full88" ? FULL88_LAYOUT : KEY_LAYOUT;
+  }
+
+  private setPianoRollStyle(style: PianoRollStyle): void {
+    if (style === this.pianoRollStyle) {
+      return;
+    }
+    this.pianoRollStyle = style;
+    saveUiSettings({ pianoRollStyle: style });
+    if (this.pianoRollStyleSelect) {
+      this.pianoRollStyleSelect.value = style;
+    }
+    this.renderKeyboardKeys();
+  }
+
+  private restoreUiSettings(): void {
+    const settings = loadUiSettings();
+    this.pianoRollStyle = settings.pianoRollStyle;
+  }
+
   private renderKeyboardKeys(): void {
     if (!this.keyboardBoard) {
       return;
@@ -5694,14 +5835,24 @@ export class SynthApp {
     this.keyButtons.clear();
     this.keyboardBoard.replaceChildren();
 
-    const whiteWidth = 100 / TOTAL_WHITE_COUNT;
+    const layoutKeys = this.activeKeyLayout();
+    const whiteCount =
+      this.pianoRollStyle === "full88" ? FULL88_WHITE_COUNT : TOTAL_WHITE_COUNT;
+    const whiteWidth = 100 / whiteCount;
+    const full88 = this.pianoRollStyle === "full88";
+
+    this.keyboardBoard.className = full88
+      ? "relative min-w-0 flex-1 overflow-x-auto"
+      : "relative min-w-0 flex-1";
 
     this.whiteRow = document.createElement("div");
-    this.whiteRow.className = "relative flex min-h-[4.5rem] w-full gap-px";
+    this.whiteRow.className = full88
+      ? "relative flex min-h-[4.5rem] w-full min-w-[48rem] gap-px"
+      : "relative flex min-h-[4.5rem] w-full gap-px";
 
-    const whiteKeys = KEY_LAYOUT.filter((item) => item.white).sort(
-      (left, right) => left.semitone - right.semitone,
-    );
+    const whiteKeys = layoutKeys
+      .filter((item) => item.white)
+      .sort((left, right) => left.semitone - right.semitone);
 
     for (const layout of whiteKeys) {
       const button = this.createKeyButton(layout);
@@ -5712,8 +5863,8 @@ export class SynthApp {
       this.whiteRow.append(button);
     }
 
-    for (const layout of KEY_LAYOUT.filter((item) => !item.white)) {
-      const prevWhite = KEY_LAYOUT.find(
+    for (const layout of layoutKeys.filter((item) => !item.white)) {
+      const prevWhite = layoutKeys.find(
         (item) => item.white && item.semitone === layout.semitone - 1,
       );
       if (prevWhite?.whiteIndex === undefined) {
@@ -5732,6 +5883,7 @@ export class SynthApp {
 
     this.keyboardBoard.append(this.whiteRow);
     this.applyKeyboardHeight();
+    this.syncKeyboardPressedVisuals();
   }
 
   private formatOctaveLabel(): string {
@@ -5750,11 +5902,15 @@ export class SynthApp {
 
     const nextButtons = new Map<number, HTMLButtonElement>();
 
-    for (const layout of KEY_LAYOUT) {
+    for (const layout of this.activeKeyLayout()) {
       const note = this.noteForLayout(layout);
-      const button = this.keyboardBoard.querySelector<HTMLButtonElement>(
-        `button[data-key-code="${layout.keyCode}"]`,
-      );
+      const button = layout.keyCode
+        ? this.keyboardBoard.querySelector<HTMLButtonElement>(
+            `button[data-key-code="${layout.keyCode}"]`,
+          )
+        : this.keyboardBoard.querySelector<HTMLButtonElement>(
+            `button[data-midi-base="${layout.midiNote}"]`,
+          );
       if (!button) {
         continue;
       }
@@ -5764,11 +5920,50 @@ export class SynthApp {
       if (noteLabel) {
         noteLabel.textContent = midiNoteLabel(note);
       }
+      if (layout.midiNote !== undefined) {
+        this.syncComputerKeyLabel(button, layout.midiNote, true);
+      }
       nextButtons.set(note, button);
     }
 
     this.keyButtons = nextButtons;
     this.syncKeyboardPressedVisuals();
+  }
+
+  /** QWERTY mapping for the compact octave window, keyed by absolute MIDI note. */
+  private computerKeyCodeForMidiBase(midiBase: number): string | undefined {
+    const relative = midiBase - baseMidiForOctave(this.octave);
+    return KEY_LAYOUT.find((item) => item.semitone === relative)?.keyCode;
+  }
+
+  private syncComputerKeyLabel(
+    button: HTMLButtonElement,
+    midiBase: number,
+    full88: boolean,
+  ): void {
+    const keyCode = this.computerKeyCodeForMidiBase(midiBase);
+    let computerKey = button.querySelector<HTMLElement>(
+      "[data-computer-key-label]",
+    );
+    if (!keyCode) {
+      computerKey?.remove();
+      return;
+    }
+
+    if (!computerKey) {
+      computerKey = document.createElement("span");
+      computerKey.dataset.computerKeyLabel = "true";
+      computerKey.className = full88
+        ? "text-[8px] font-semibold uppercase leading-none"
+        : "text-xs font-semibold uppercase";
+      const noteLabel = button.querySelector("[data-note-label]");
+      if (noteLabel) {
+        button.insertBefore(computerKey, noteLabel);
+      } else {
+        button.append(computerKey);
+      }
+    }
+    computerKey.textContent = keyCodeLabel(keyCode);
   }
 
   private syncKeyboardPressedVisuals(): void {
@@ -5782,16 +5977,20 @@ export class SynthApp {
   }
 
   private noteForLayout(layout: KeyLayout): number {
+    if (layout.midiNote !== undefined) {
+      return Math.min(127, Math.max(0, layout.midiNote + this.transpose));
+    }
     return this.baseMidiNote() + layout.semitone;
   }
 
   private noteForKeyCode(keyCode: string): number | undefined {
+    // Computer keys always use the compact layout + octave window.
     const layout = KEY_LAYOUT.find((item) => item.keyCode === keyCode);
     if (!layout) {
       return undefined;
     }
 
-    return this.noteForLayout(layout);
+    return this.baseMidiNote() + layout.semitone;
   }
 
   private shouldHandleKeyboard(event: KeyboardEvent): boolean {
@@ -5877,24 +6076,35 @@ export class SynthApp {
     const button = document.createElement("button");
     button.type = "button";
     button.dataset.note = String(note);
-    button.dataset.keyCode = layout.keyCode;
-    button.className =
-      "flex cursor-pointer select-none flex-col items-center justify-end gap-0.5 px-0.5 py-1 font-mono text-[10px]";
-
     if (layout.keyCode) {
-      const computerKey = document.createElement("span");
-      computerKey.className = "text-xs font-semibold uppercase";
-      computerKey.textContent = keyCodeLabel(layout.keyCode);
-      button.append(computerKey);
+      button.dataset.keyCode = layout.keyCode;
     }
+    if (layout.midiNote !== undefined) {
+      button.dataset.midiBase = String(layout.midiNote);
+    }
+    const full88 = layout.midiNote !== undefined;
+    button.className = full88
+      ? "flex cursor-pointer select-none flex-col items-center justify-end px-0 py-1 font-mono text-[9px]"
+      : "flex cursor-pointer select-none flex-col items-center justify-end gap-0.5 px-0.5 py-1 font-mono text-[10px]";
 
     const noteName = document.createElement("span");
     noteName.dataset.noteLabel = "true";
-    noteName.className =
-      "min-w-[2.25rem] text-center text-[9px] tabular-nums opacity-50";
+    noteName.className = full88
+      ? "max-w-full truncate px-px text-center text-[7px] leading-none tabular-nums opacity-60"
+      : "min-w-[2.25rem] text-center text-[9px] tabular-nums opacity-50";
     noteName.textContent = midiNoteLabel(note);
-
     button.append(noteName);
+
+    if (layout.keyCode) {
+      const computerKey = document.createElement("span");
+      computerKey.dataset.computerKeyLabel = "true";
+      computerKey.className = "text-xs font-semibold uppercase";
+      computerKey.textContent = keyCodeLabel(layout.keyCode);
+      button.insertBefore(computerKey, noteName);
+    } else if (layout.midiNote !== undefined) {
+      this.syncComputerKeyLabel(button, layout.midiNote, true);
+    }
+
     this.keyButtons.set(note, button);
 
     // Resolve note on each event so octave/transpose changes apply to clicks
