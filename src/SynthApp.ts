@@ -576,6 +576,14 @@ const MIN_OCTAVE = 0;
 const MAX_OCTAVE = 7;
 const DEFAULT_OCTAVE = 4;
 const MIN_TRANSPOSE = -11;
+const MIDI_FILE_SKIP_SECONDS = 5;
+
+function formatMidiClock(seconds: number): string {
+  const total = Math.max(0, Math.floor(seconds + 1e-6));
+  const minutes = Math.floor(total / 60);
+  const secs = total % 60;
+  return `${minutes}:${secs.toString().padStart(2, "0")}`;
+}
 const MAX_TRANSPOSE = 11;
 const DEFAULT_TRANSPOSE = 0;
 const MAIN_WHITE_COUNT = 7;
@@ -2966,11 +2974,15 @@ export class SynthApp {
   private midiFilePlaying = false;
   private midiFileEventIndex = 0;
   private midiFileOriginMs = 0;
+  /** Playback cursor when stopped; ignored while playing (use wall-clock origin). */
+  private midiFileCursorSeconds = 0;
   private midiFileTimer: number | null = null;
   private readonly midiFileHoldCounts = new Map<number, number>();
   private midiFileStatusEl: HTMLElement | null = null;
-  private midiFilePlayButton: HTMLButtonElement | null = null;
-  private midiFileStopButton: HTMLButtonElement | null = null;
+  private midiFileTimeEl: HTMLElement | null = null;
+  private midiFilePlayStopButton: HTMLButtonElement | null = null;
+  private midiFileBackButton: HTMLButtonElement | null = null;
+  private midiFileForwardButton: HTMLButtonElement | null = null;
   private midiFileInput: HTMLInputElement | null = null;
 
   mount(container: HTMLElement): void {
@@ -3127,8 +3139,10 @@ export class SynthApp {
     this.midiEnableButton = null;
     this.midiActivityEl = null;
     this.midiFileStatusEl = null;
-    this.midiFilePlayButton = null;
-    this.midiFileStopButton = null;
+    this.midiFileTimeEl = null;
+    this.midiFilePlayStopButton = null;
+    this.midiFileBackButton = null;
+    this.midiFileForwardButton = null;
     this.midiFileInput = null;
     this.root?.remove();
     this.root = null;
@@ -4564,14 +4578,23 @@ export class SynthApp {
 
   private refreshMidiFilePanel(): void {
     const hasSong = this.midiSong !== null;
-    if (this.midiFilePlayButton) {
-      this.midiFilePlayButton.disabled = !hasSong || this.midiFilePlaying;
-      this.midiFilePlayButton.textContent = this.midiFilePlaying
-        ? "Playing…"
+    if (this.midiFilePlayStopButton) {
+      this.midiFilePlayStopButton.disabled = !hasSong;
+      this.midiFilePlayStopButton.textContent = this.midiFilePlaying
+        ? "Stop"
         : "Play";
+      this.midiFilePlayStopButton.title = this.midiFilePlaying
+        ? "Stop MIDI file"
+        : "Play MIDI file";
+      this.midiFilePlayStopButton.className = this.midiFilePlaying
+        ? "shrink-0 rounded border border-slate-700 px-1.5 py-0.5 text-[10px] text-slate-300 hover:border-slate-500 hover:text-slate-100 disabled:cursor-not-allowed disabled:opacity-40"
+        : "shrink-0 rounded border border-emerald-700/70 bg-emerald-950/40 px-1.5 py-0.5 text-[10px] text-emerald-300 hover:border-emerald-500 hover:text-emerald-200 disabled:cursor-not-allowed disabled:opacity-40";
     }
-    if (this.midiFileStopButton) {
-      this.midiFileStopButton.disabled = !this.midiFilePlaying;
+    if (this.midiFileBackButton) {
+      this.midiFileBackButton.disabled = !hasSong;
+    }
+    if (this.midiFileForwardButton) {
+      this.midiFileForwardButton.disabled = !hasSong;
     }
 
     if (this.midiFileStatusEl) {
@@ -4579,6 +4602,22 @@ export class SynthApp {
         ? this.midiSong.name
         : "No MIDI file";
     }
+    this.refreshMidiFileTime();
+  }
+
+  private refreshMidiFileTime(): void {
+    if (!this.midiFileTimeEl) {
+      return;
+    }
+    if (!this.midiSong) {
+      this.midiFileTimeEl.textContent = "0:00 / 0:00";
+      return;
+    }
+    const current = Math.min(
+      this.midiSong.duration,
+      this.midiFilePlaybackTime(),
+    );
+    this.midiFileTimeEl.textContent = `${formatMidiClock(current)} / ${formatMidiClock(this.midiSong.duration)}`;
   }
 
   private async loadMidiFile(file: File): Promise<void> {
@@ -4604,6 +4643,119 @@ export class SynthApp {
       return;
     }
 
+    this.midiFileCursorSeconds = 0;
+    this.refreshMidiFilePanel();
+  }
+
+  private midiFilePlaybackTime(): number {
+    if (!this.midiSong) {
+      return 0;
+    }
+    if (this.midiFilePlaying) {
+      return Math.max(0, (performance.now() - this.midiFileOriginMs) / 1000);
+    }
+    return this.midiFileCursorSeconds;
+  }
+
+  private findMidiFileEventIndex(timeSeconds: number): number {
+    if (!this.midiSong) {
+      return 0;
+    }
+    const events = this.midiSong.events;
+    let index = 0;
+    while (index < events.length && events[index].time < timeSeconds) {
+      index += 1;
+    }
+    return index;
+  }
+
+  private activeMidiNotesAt(timeSeconds: number): Map<number, number> {
+    const active = new Map<number, number>();
+    if (!this.midiSong) {
+      return active;
+    }
+
+    for (const event of this.midiSong.events) {
+      if (event.time >= timeSeconds) {
+        break;
+      }
+      if (event.type === "noteOn") {
+        active.set(event.note, (active.get(event.note) ?? 0) + 1);
+      } else {
+        const count = (active.get(event.note) ?? 0) - 1;
+        if (count <= 0) {
+          active.delete(event.note);
+        } else {
+          active.set(event.note, count);
+        }
+      }
+    }
+    return active;
+  }
+
+  private clearMidiFileHeldNotes(): void {
+    for (const note of [...this.midiFileHoldCounts.keys()]) {
+      this.releaseMidiFileNote(note, true);
+    }
+    this.midiFileHoldCounts.clear();
+  }
+
+  private applyMidiFilePosition(timeSeconds: number, resumeHolds: boolean): void {
+    if (!this.midiSong) {
+      return;
+    }
+
+    const duration = this.midiSong.duration;
+    const target = Math.min(duration, Math.max(0, timeSeconds));
+    this.clearMidiFileHeldNotes();
+    this.midiFileEventIndex = this.findMidiFileEventIndex(target);
+    this.midiFileCursorSeconds = target;
+    this.midiFileOriginMs = performance.now() - target * 1000;
+
+    if (!resumeHolds) {
+      return;
+    }
+
+    for (const [rawNote, count] of this.activeMidiNotesAt(target)) {
+      const note = Math.min(127, Math.max(0, rawNote + this.transpose));
+      this.midiFileHoldCounts.set(note, count);
+      if (!this.pressedKeys.has(note)) {
+        this.pressedKeys.add(note);
+        this.setKeyPressed(this.keyButtons.get(note), true);
+        this.synth.noteOn(note);
+      }
+    }
+    this.updateChordDisplay();
+  }
+
+  private skipMidiFile(deltaSeconds: number): void {
+    if (!this.midiSong) {
+      return;
+    }
+
+    const target = this.midiFilePlaybackTime() + deltaSeconds;
+    if (this.midiFilePlaying) {
+      if (this.midiFileTimer !== null) {
+        window.clearTimeout(this.midiFileTimer);
+        this.midiFileTimer = null;
+      }
+
+      if (target >= this.midiSong.duration) {
+        this.midiFilePlaying = false;
+        this.clearMidiFileHeldNotes();
+        this.midiFileEventIndex = this.midiSong.events.length;
+        this.midiFileCursorSeconds = 0;
+        this.refreshMidiFilePanel();
+        return;
+      }
+
+      this.applyMidiFilePosition(target, true);
+      this.refreshMidiFilePanel();
+      this.pumpMidiFileScheduler();
+      return;
+    }
+
+    this.applyMidiFilePosition(target, false);
     this.refreshMidiFilePanel();
   }
 
@@ -4617,9 +4769,12 @@ export class SynthApp {
       return;
     }
 
+    if (this.midiFileCursorSeconds >= this.midiSong.duration) {
+      this.midiFileCursorSeconds = 0;
+    }
+
     this.midiFilePlaying = true;
-    this.midiFileEventIndex = 0;
-    this.midiFileOriginMs = performance.now();
+    this.applyMidiFilePosition(this.midiFileCursorSeconds, true);
     this.refreshMidiFilePanel();
     this.pumpMidiFileScheduler();
   }
@@ -4632,11 +4787,9 @@ export class SynthApp {
       this.midiFileTimer = null;
     }
 
-    for (const note of [...this.midiFileHoldCounts.keys()]) {
-      this.releaseMidiFileNote(note, true);
-    }
-    this.midiFileHoldCounts.clear();
+    this.clearMidiFileHeldNotes();
     this.midiFileEventIndex = 0;
+    this.midiFileCursorSeconds = 0;
 
     if (wasPlaying || this.midiSong) {
       this.refreshMidiFilePanel();
@@ -4670,14 +4823,13 @@ export class SynthApp {
       // Let ringing notes finish via their note-offs already processed; stop cleanly.
       this.midiFilePlaying = false;
       this.midiFileTimer = null;
-      for (const note of [...this.midiFileHoldCounts.keys()]) {
-        this.releaseMidiFileNote(note, true);
-      }
-      this.midiFileHoldCounts.clear();
+      this.clearMidiFileHeldNotes();
+      this.midiFileCursorSeconds = 0;
       this.refreshMidiFilePanel();
       return;
     }
 
+    this.refreshMidiFileTime();
     this.updateVisualizations();
     this.midiFileTimer = window.setTimeout(() => {
       this.midiFileTimer = null;
@@ -5333,38 +5485,68 @@ export class SynthApp {
       { signal: this.abort.signal },
     );
 
-    this.midiFilePlayButton = document.createElement("button");
-    this.midiFilePlayButton.type = "button";
-    this.midiFilePlayButton.className =
-      "shrink-0 rounded border border-emerald-700/70 bg-emerald-950/40 px-1.5 py-0.5 text-[10px] text-emerald-300 hover:border-emerald-500 hover:text-emerald-200 disabled:cursor-not-allowed disabled:opacity-40";
-    this.midiFilePlayButton.textContent = "Play";
-    this.midiFilePlayButton.addEventListener(
+    this.midiFileBackButton = document.createElement("button");
+    this.midiFileBackButton.type = "button";
+    this.midiFileBackButton.className = barButtonClass;
+    this.midiFileBackButton.textContent = "«";
+    this.midiFileBackButton.title = `Skip back ${MIDI_FILE_SKIP_SECONDS}s`;
+    this.midiFileBackButton.addEventListener(
       "click",
       () => {
-        void this.playMidiFile();
+        this.skipMidiFile(-MIDI_FILE_SKIP_SECONDS);
       },
       { signal: this.abort.signal },
     );
 
-    this.midiFileStopButton = document.createElement("button");
-    this.midiFileStopButton.type = "button";
-    this.midiFileStopButton.className = barButtonClass;
-    this.midiFileStopButton.textContent = "Stop";
-    this.midiFileStopButton.addEventListener(
+    this.midiFilePlayStopButton = document.createElement("button");
+    this.midiFilePlayStopButton.type = "button";
+    this.midiFilePlayStopButton.className =
+      "shrink-0 rounded border border-emerald-700/70 bg-emerald-950/40 px-1.5 py-0.5 text-[10px] text-emerald-300 hover:border-emerald-500 hover:text-emerald-200 disabled:cursor-not-allowed disabled:opacity-40";
+    this.midiFilePlayStopButton.textContent = "Play";
+    this.midiFilePlayStopButton.title = "Play MIDI file";
+    this.midiFilePlayStopButton.addEventListener(
       "click",
       () => {
-        this.stopMidiFile();
+        if (this.midiFilePlaying) {
+          this.stopMidiFile();
+        } else {
+          void this.playMidiFile();
+        }
       },
       { signal: this.abort.signal },
     );
+
+    this.midiFileForwardButton = document.createElement("button");
+    this.midiFileForwardButton.type = "button";
+    this.midiFileForwardButton.className = barButtonClass;
+    this.midiFileForwardButton.textContent = "»";
+    this.midiFileForwardButton.title = `Skip forward ${MIDI_FILE_SKIP_SECONDS}s`;
+    this.midiFileForwardButton.addEventListener(
+      "click",
+      () => {
+        this.skipMidiFile(MIDI_FILE_SKIP_SECONDS);
+      },
+      { signal: this.abort.signal },
+    );
+
+    this.midiFileTimeEl = document.createElement("span");
+    this.midiFileTimeEl.className =
+      "shrink-0 font-mono text-[10px] tabular-nums text-slate-400";
+    this.midiFileTimeEl.textContent = "0:00 / 0:00";
+    this.midiFileTimeEl.setAttribute("aria-label", "MIDI playback time");
 
     this.midiFileStatusEl = document.createElement("span");
     this.midiFileStatusEl.className =
       "min-w-0 truncate text-right font-mono text-[10px] text-slate-500";
 
     const midiTransport = document.createElement("div");
-    midiTransport.className = "flex min-w-0 items-center gap-1";
-    midiTransport.append(this.midiFilePlayButton, this.midiFileStopButton);
+    midiTransport.className = "flex min-w-0 items-center gap-1.5";
+    midiTransport.append(
+      this.midiFilePlayStopButton,
+      this.midiFileBackButton,
+      this.midiFileForwardButton,
+      this.midiFileTimeEl,
+    );
 
     const chordCenter = document.createElement("div");
     chordCenter.className = "flex items-center justify-center px-2";
