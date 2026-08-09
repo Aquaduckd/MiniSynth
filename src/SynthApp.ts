@@ -7,9 +7,9 @@ import {
 } from "./constants.js";
 import { MidiDeviceManager } from "./midi/MidiDeviceManager.js";
 import { MidiFilePlayer } from "./midi/MidiFilePlayer.js";
-import { PIANO_ROLL_STYLE_OPTIONS } from "./music/keyboard.js";
 import { BUILT_IN_PRESETS } from "./storage/presets.js";
 import type { EffectsParams, SynthParams, SynthPreset } from "./types.js";
+import { ConfigModal } from "./ui/ConfigModal.js";
 import { ControlPanels } from "./ui/ControlPanels.js";
 import type { PanelDrawContext } from "./ui/panelHost.js";
 import { PianoKeyboard } from "./ui/PianoKeyboard.js";
@@ -22,7 +22,6 @@ export class SynthApp {
   private synth = new SimpleSynth();
   private params: SynthParams = cloneParams(DEFAULT_PARAMS);
   private effectsParams: EffectsParams = { ...DEFAULT_EFFECTS };
-  private pianoRollStyleSelect: HTMLSelectElement | null = null;
   private vizObserver: ResizeObserver | null = null;
   private livePreviewFrame: number | null = null;
   private readonly abort = new AbortController();
@@ -56,7 +55,6 @@ export class SynthApp {
     },
     this.abort.signal,
   );
-  private configModal: HTMLElement | null = null;
   private readonly piano: PianoKeyboard = new PianoKeyboard({
     ensureAudioRunning: async () => {
       await this.synth.ensureRunning();
@@ -89,6 +87,23 @@ export class SynthApp {
       this.piano.release(note);
     },
   });
+  private readonly config = new ConfigModal(
+    {
+      getPianoRollStyle: () => this.piano.style,
+      setPianoRollStyle: (style) => {
+        this.piano.setStyle(style);
+      },
+      createMidiConfigSection: (signal) =>
+        this.midiDevices.createConfigSection(signal),
+      refreshMidiPanel: () => {
+        this.midiDevices.refreshPanel();
+      },
+      focusMidiEnableButton: () => {
+        this.midiDevices.focusEnableButton();
+      },
+    },
+    this.abort.signal,
+  );
   private readonly midiFilePlayer: MidiFilePlayer = new MidiFilePlayer({
     getTranspose: () => this.piano.transpose,
     ensureAudioRunning: async () => {
@@ -140,7 +155,7 @@ export class SynthApp {
     configButton.addEventListener(
       "click",
       () => {
-        this.openConfigModal();
+        this.config.open();
       },
       { signal: this.abort.signal },
     );
@@ -215,9 +230,7 @@ export class SynthApp {
     this.midiDevices.dispose();
     this.abort.abort();
     this.presets.dispose();
-    this.configModal?.remove();
-    this.configModal = null;
-    this.pianoRollStyleSelect = null;
+    this.config.dispose();
     this.midiFilePlayer.dispose();
     this.piano.dispose();
     this.root?.remove();
@@ -327,146 +340,5 @@ export class SynthApp {
     this.synth.setParams(this.params);
     this.synth.setEffectsParams(this.effectsParams);
     this.panels.syncControlsFromState();
-  }
-
-  private openConfigModal(): void {
-    if (!this.configModal) {
-      this.configModal = this.createConfigModal();
-      document.body.append(this.configModal);
-    }
-
-    this.midiDevices.refreshPanel();
-    if (this.pianoRollStyleSelect) {
-      this.pianoRollStyleSelect.value = this.piano.style;
-    }
-    this.configModal.classList.remove("hidden");
-    this.configModal.classList.add("flex");
-    this.midiDevices.focusEnableButton();
-  }
-
-  private closeConfigModal(): void {
-    if (!this.configModal) {
-      return;
-    }
-
-    this.configModal.classList.add("hidden");
-    this.configModal.classList.remove("flex");
-  }
-
-  private createConfigModal(): HTMLElement {
-    const overlay = document.createElement("div");
-    overlay.className =
-      "fixed inset-0 z-50 hidden items-center justify-center bg-slate-950/70 p-4 backdrop-blur-[2px]";
-
-    const dialog = document.createElement("div");
-    dialog.className =
-      "flex max-h-[min(36rem,90vh)] w-full max-w-md flex-col overflow-hidden rounded-lg border border-slate-700 bg-slate-900 shadow-2xl";
-    dialog.setAttribute("role", "dialog");
-    dialog.setAttribute("aria-modal", "true");
-    dialog.setAttribute("aria-label", "Config");
-
-    const header = document.createElement("div");
-    header.className =
-      "flex items-center justify-between gap-3 border-b border-slate-800 px-4 py-3";
-
-    const title = document.createElement("h2");
-    title.className = "text-sm font-medium text-slate-100";
-    title.textContent = "Config";
-
-    const closeButton = document.createElement("button");
-    closeButton.type = "button";
-    closeButton.className =
-      "rounded border border-slate-700 px-2 py-1 text-[11px] text-slate-300 hover:border-slate-500 hover:text-slate-100";
-    closeButton.textContent = "Close";
-    closeButton.addEventListener(
-      "click",
-      () => {
-        this.closeConfigModal();
-      },
-      { signal: this.abort.signal },
-    );
-
-    header.append(title, closeButton);
-
-    const body = document.createElement("div");
-    body.className = "min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-3";
-
-    const pianoSection = document.createElement("section");
-    pianoSection.className = "space-y-3";
-
-    const pianoTitle = document.createElement("h3");
-    pianoTitle.className =
-      "text-[11px] font-medium uppercase tracking-wide text-slate-500";
-    pianoTitle.textContent = "Piano Roll";
-
-    const pianoField = document.createElement("label");
-    pianoField.className = "flex flex-col gap-1.5";
-
-    const pianoFieldLabel = document.createElement("span");
-    pianoFieldLabel.className = "text-[12px] text-slate-300";
-    pianoFieldLabel.textContent = "Style";
-
-    this.pianoRollStyleSelect = document.createElement("select");
-    this.pianoRollStyleSelect.className =
-      "rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-[12px] text-slate-100 outline-none hover:border-slate-500 focus:border-teal-600";
-    for (const option of PIANO_ROLL_STYLE_OPTIONS) {
-      const item = document.createElement("option");
-      item.value = option.value;
-      item.textContent = option.label;
-      this.pianoRollStyleSelect.append(item);
-    }
-    this.pianoRollStyleSelect.value = this.piano.style;
-    this.pianoRollStyleSelect.addEventListener(
-      "change",
-      () => {
-        const value = this.pianoRollStyleSelect?.value;
-        if (value === "compact" || value === "full88") {
-          this.piano.setStyle(value);
-        }
-      },
-      { signal: this.abort.signal },
-    );
-
-    const pianoHint = document.createElement("p");
-    pianoHint.className = "text-[11px] leading-relaxed text-slate-500";
-    pianoHint.textContent =
-      "Compact is the computer-keyboard layout. Full 88-key shows A0–C8 for MIDI controllers and files.";
-
-    pianoField.append(pianoFieldLabel, this.pianoRollStyleSelect);
-    pianoSection.append(pianoTitle, pianoField, pianoHint);
-
-    const midiSection = this.midiDevices.createConfigSection(
-      this.abort.signal,
-    );
-    body.append(pianoSection, midiSection);
-    dialog.append(header, body);
-    overlay.append(dialog);
-
-    overlay.addEventListener(
-      "click",
-      (event) => {
-        if (event.target === overlay) {
-          this.closeConfigModal();
-        }
-      },
-      { signal: this.abort.signal },
-    );
-
-    window.addEventListener(
-      "keydown",
-      (event) => {
-        if (event.key !== "Escape") {
-          return;
-        }
-        if (!this.configModal || this.configModal.classList.contains("hidden")) {
-          return;
-        }
-        event.preventDefault();
-        this.closeConfigModal();
-      },
-      { signal: this.abort.signal },
-    );
-
-    return overlay;
   }
 }
