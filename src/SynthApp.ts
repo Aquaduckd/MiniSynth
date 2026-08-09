@@ -3,6 +3,7 @@ import {
   type RotaryKnobHandle,
   type RotaryKnobOptions,
 } from "./RotaryKnob.js";
+import { parseMidiFile, type MidiSong } from "./midiFile.js";
 
 function isEditableTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) {
@@ -2959,6 +2960,16 @@ export class SynthApp {
   private midiEnableButton: HTMLButtonElement | null = null;
   private midiActivityEl: HTMLElement | null = null;
   private midiActivityTimer: number | null = null;
+  private midiSong: MidiSong | null = null;
+  private midiFilePlaying = false;
+  private midiFileEventIndex = 0;
+  private midiFileOriginMs = 0;
+  private midiFileTimer: number | null = null;
+  private readonly midiFileHoldCounts = new Map<number, number>();
+  private midiFileStatusEl: HTMLElement | null = null;
+  private midiFilePlayButton: HTMLButtonElement | null = null;
+  private midiFileStopButton: HTMLButtonElement | null = null;
+  private midiFileInput: HTMLInputElement | null = null;
 
   mount(container: HTMLElement): void {
     if (this.root) {
@@ -3113,6 +3124,10 @@ export class SynthApp {
     this.midiDeviceListEl = null;
     this.midiEnableButton = null;
     this.midiActivityEl = null;
+    this.midiFileStatusEl = null;
+    this.midiFilePlayButton = null;
+    this.midiFileStopButton = null;
+    this.midiFileInput = null;
     this.root?.remove();
     this.root = null;
     this.controlsEl = null;
@@ -3146,7 +3161,8 @@ export class SynthApp {
     window.addEventListener(
       "blur",
       () => {
-        this.releaseAllKeys();
+        // Drop stuck computer/pointer keys, but keep MIDI file playback going.
+        this.releaseManualKeys();
       },
       { signal: this.abort.signal },
     );
@@ -4544,6 +4560,163 @@ export class SynthApp {
     return overlay;
   }
 
+  private refreshMidiFilePanel(): void {
+    const hasSong = this.midiSong !== null;
+    if (this.midiFilePlayButton) {
+      this.midiFilePlayButton.disabled = !hasSong || this.midiFilePlaying;
+      this.midiFilePlayButton.textContent = this.midiFilePlaying
+        ? "Playing…"
+        : "Play";
+    }
+    if (this.midiFileStopButton) {
+      this.midiFileStopButton.disabled = !this.midiFilePlaying;
+    }
+
+    if (this.midiFileStatusEl) {
+      this.midiFileStatusEl.textContent = this.midiSong
+        ? this.midiSong.name
+        : "No MIDI file";
+    }
+  }
+
+  private async loadMidiFile(file: File): Promise<void> {
+    this.stopMidiFile();
+    try {
+      const buffer = await file.arrayBuffer();
+      this.midiSong = parseMidiFile(buffer, file.name);
+      if (this.midiSong.events.length === 0) {
+        this.midiSong = null;
+        this.refreshMidiFilePanel();
+        if (this.midiFileStatusEl) {
+          this.midiFileStatusEl.textContent = "No playable notes";
+        }
+        return;
+      }
+    } catch (error) {
+      this.midiSong = null;
+      this.refreshMidiFilePanel();
+      if (this.midiFileStatusEl) {
+        this.midiFileStatusEl.textContent =
+          error instanceof Error ? error.message : "Could not read MIDI file";
+      }
+      return;
+    }
+
+    this.refreshMidiFilePanel();
+  }
+
+  private async playMidiFile(): Promise<void> {
+    if (!this.midiSong || this.midiFilePlaying) {
+      return;
+    }
+
+    await this.synth.ensureRunning();
+    if (!this.midiSong || this.abort.signal.aborted) {
+      return;
+    }
+
+    this.midiFilePlaying = true;
+    this.midiFileEventIndex = 0;
+    this.midiFileOriginMs = performance.now();
+    this.refreshMidiFilePanel();
+    this.pumpMidiFileScheduler();
+  }
+
+  private stopMidiFile(): void {
+    const wasPlaying = this.midiFilePlaying;
+    this.midiFilePlaying = false;
+    if (this.midiFileTimer !== null) {
+      window.clearTimeout(this.midiFileTimer);
+      this.midiFileTimer = null;
+    }
+
+    for (const note of [...this.midiFileHoldCounts.keys()]) {
+      this.releaseMidiFileNote(note, true);
+    }
+    this.midiFileHoldCounts.clear();
+    this.midiFileEventIndex = 0;
+
+    if (wasPlaying || this.midiSong) {
+      this.refreshMidiFilePanel();
+    }
+  }
+
+  private pumpMidiFileScheduler(): void {
+    if (!this.midiFilePlaying || !this.midiSong) {
+      return;
+    }
+
+    const elapsed = (performance.now() - this.midiFileOriginMs) / 1000;
+    const horizon = elapsed + 0.08;
+    const events = this.midiSong.events;
+
+    while (
+      this.midiFileEventIndex < events.length
+      && events[this.midiFileEventIndex].time <= horizon
+    ) {
+      const event = events[this.midiFileEventIndex];
+      this.midiFileEventIndex += 1;
+      const note = Math.min(127, Math.max(0, event.note + this.transpose));
+      if (event.type === "noteOn") {
+        this.acquireMidiFileNote(note);
+      } else {
+        this.releaseMidiFileNote(note);
+      }
+    }
+
+    if (this.midiFileEventIndex >= events.length) {
+      // Let ringing notes finish via their note-offs already processed; stop cleanly.
+      this.midiFilePlaying = false;
+      this.midiFileTimer = null;
+      for (const note of [...this.midiFileHoldCounts.keys()]) {
+        this.releaseMidiFileNote(note, true);
+      }
+      this.midiFileHoldCounts.clear();
+      this.refreshMidiFilePanel();
+      return;
+    }
+
+    this.updateVisualizations();
+    this.midiFileTimer = window.setTimeout(() => {
+      this.midiFileTimer = null;
+      this.pumpMidiFileScheduler();
+    }, 20);
+  }
+
+  private acquireMidiFileNote(note: number): void {
+    const count = (this.midiFileHoldCounts.get(note) ?? 0) + 1;
+    this.midiFileHoldCounts.set(note, count);
+    if (count !== 1) {
+      return;
+    }
+
+    // Drive the synth synchronously — async pressKey can lose notes when many
+    // file events land in the same scheduler slice (noteOff before await).
+    if (!this.pressedKeys.has(note)) {
+      this.pressedKeys.add(note);
+      this.setKeyPressed(this.keyButtons.get(note), true);
+      this.synth.noteOn(note);
+    }
+    this.updateChordDisplay();
+  }
+
+  private releaseMidiFileNote(note: number, force = false): void {
+    if (force) {
+      this.midiFileHoldCounts.delete(note);
+      this.releaseKey(note);
+      return;
+    }
+
+    const count = (this.midiFileHoldCounts.get(note) ?? 0) - 1;
+    if (count <= 0) {
+      this.midiFileHoldCounts.delete(note);
+      this.releaseKey(note);
+      return;
+    }
+
+    this.midiFileHoldCounts.set(note, count);
+  }
+
   private refreshMidiPanel(): void {
     if (!this.midiStatusEl || !this.midiDeviceListEl || !this.midiEnableButton) {
       return;
@@ -5122,15 +5295,91 @@ export class SynthApp {
 
     const chordBar = document.createElement("div");
     chordBar.className =
-      "mx-auto mb-1.5 flex h-6 w-full min-w-0 items-center justify-center rounded-md border border-slate-800/80 bg-slate-950/40 px-3";
-    chordBar.setAttribute("aria-live", "polite");
-    chordBar.setAttribute("aria-label", "Current chord");
+      "mx-auto mb-1.5 grid h-8 w-full min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2 rounded-md border border-slate-800/80 bg-slate-950/40 px-2";
+
+    const barButtonClass =
+      "shrink-0 rounded border border-slate-700 px-1.5 py-0.5 text-[10px] text-slate-300 hover:border-slate-500 hover:text-slate-100 disabled:cursor-not-allowed disabled:opacity-40";
+
+    this.midiFileInput = document.createElement("input");
+    this.midiFileInput.type = "file";
+    this.midiFileInput.accept = ".mid,.midi,audio/midi,audio/x-midi";
+    this.midiFileInput.className = "hidden";
+    this.midiFileInput.addEventListener(
+      "change",
+      () => {
+        const file = this.midiFileInput?.files?.[0];
+        if (this.midiFileInput) {
+          this.midiFileInput.value = "";
+        }
+        if (file) {
+          void this.loadMidiFile(file);
+        }
+      },
+      { signal: this.abort.signal },
+    );
+
+    const loadButton = document.createElement("button");
+    loadButton.type = "button";
+    loadButton.className = barButtonClass;
+    loadButton.textContent = "Load";
+    loadButton.title = "Load MIDI file";
+    loadButton.addEventListener(
+      "click",
+      () => {
+        this.midiFileInput?.click();
+      },
+      { signal: this.abort.signal },
+    );
+
+    this.midiFilePlayButton = document.createElement("button");
+    this.midiFilePlayButton.type = "button";
+    this.midiFilePlayButton.className =
+      "shrink-0 rounded border border-emerald-700/70 bg-emerald-950/40 px-1.5 py-0.5 text-[10px] text-emerald-300 hover:border-emerald-500 hover:text-emerald-200 disabled:cursor-not-allowed disabled:opacity-40";
+    this.midiFilePlayButton.textContent = "Play";
+    this.midiFilePlayButton.addEventListener(
+      "click",
+      () => {
+        void this.playMidiFile();
+      },
+      { signal: this.abort.signal },
+    );
+
+    this.midiFileStopButton = document.createElement("button");
+    this.midiFileStopButton.type = "button";
+    this.midiFileStopButton.className = barButtonClass;
+    this.midiFileStopButton.textContent = "Stop";
+    this.midiFileStopButton.addEventListener(
+      "click",
+      () => {
+        this.stopMidiFile();
+      },
+      { signal: this.abort.signal },
+    );
+
+    this.midiFileStatusEl = document.createElement("span");
+    this.midiFileStatusEl.className =
+      "min-w-0 truncate text-right font-mono text-[10px] text-slate-500";
+
+    const midiTransport = document.createElement("div");
+    midiTransport.className = "flex min-w-0 items-center gap-1";
+    midiTransport.append(this.midiFilePlayButton, this.midiFileStopButton);
+
+    const chordCenter = document.createElement("div");
+    chordCenter.className = "flex items-center justify-center px-2";
+    chordCenter.setAttribute("aria-live", "polite");
+    chordCenter.setAttribute("aria-label", "Current chord");
 
     this.chordLabelEl = document.createElement("span");
     this.chordLabelEl.className =
       "font-mono text-xs tabular-nums tracking-wide text-slate-500";
     this.chordLabelEl.textContent = "—";
-    chordBar.append(this.chordLabelEl);
+    chordCenter.append(this.chordLabelEl);
+
+    const midiMeta = document.createElement("div");
+    midiMeta.className = "flex min-w-0 items-center justify-end gap-1.5";
+    midiMeta.append(this.midiFileStatusEl, loadButton, this.midiFileInput);
+
+    chordBar.append(midiTransport, chordCenter, midiMeta);
 
     this.keyboardRow = document.createElement("div");
     this.keyboardRow.className =
@@ -5229,6 +5478,7 @@ export class SynthApp {
     this.renderKeyboardKeys();
     this.updatePitchControls();
     this.updateChordDisplay();
+    this.refreshMidiFilePanel();
     return wrapper;
   }
 
@@ -5782,7 +6032,19 @@ export class SynthApp {
     this.updateVisualizations();
   }
 
+  private releaseManualKeys(): void {
+    for (const note of [...this.pressedKeys]) {
+      if (this.midiFileHoldCounts.has(note)) {
+        continue;
+      }
+      this.releaseKey(note);
+    }
+    this.updateChordDisplay();
+    this.updateVisualizations();
+  }
+
   private releaseAllKeys(): void {
+    this.stopMidiFile();
     for (const note of this.pressedKeys) {
       this.setKeyPressed(this.keyButtons.get(note), false);
     }
