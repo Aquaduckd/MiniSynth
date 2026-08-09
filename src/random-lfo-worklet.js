@@ -1,5 +1,5 @@
 /// Continuous random / Perlin pitch-mod LFO.
-/// Must stay in sync with randomModSample() in SynthApp.ts.
+/// Must stay in sync with randomModSample() in audio/preview.ts.
 
 function createPerlinPermutation(seed = 42) {
   const source = new Uint8Array(256);
