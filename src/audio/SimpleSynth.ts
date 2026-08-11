@@ -18,6 +18,10 @@ import type {
   SynthParams,
 } from "../types.js";
 import {
+  FM_MOD_DEPTH_RATIO,
+  getFmAlgorithm,
+} from "./fmAlgorithms.js";
+import {
   clampRandomRate,
   createReverbImpulse,
   cutoffHz,
@@ -66,7 +70,10 @@ export class SimpleSynth {
   private readonly pendingStarts = new Set<number>();
   private readonly pulseReal = new Float32Array(HARMONICS);
   private readonly pulseImag = new Float32Array(HARMONICS);
-  private readonly pulseWaves: Array<PeriodicWave | null> = [null, null, null];
+  private readonly pulseWaves: Array<PeriodicWave | null> = Array.from(
+    { length: OSC_COUNT },
+    () => null,
+  );
   private workletLoading: Promise<void> | null = null;
   private workletReady = false;
   private params: SynthParams = cloneParams(DEFAULT_PARAMS);
@@ -113,8 +120,7 @@ export class SimpleSynth {
     const configChanged = Array.from({ length: OSC_COUNT }, (_, osc) => {
       return (
         params.oscWaveforms[osc] !== previous.oscWaveforms[osc]
-        || (params.oscWaveforms[osc] === "pulse"
-          && params.oscPulseWidths[osc] !== previous.oscPulseWidths[osc])
+        || params.oscPulseWidths[osc] !== previous.oscPulseWidths[osc]
       );
     });
     const pitchChangedFlags = Array.from({ length: OSC_COUNT }, (_, osc) => {
@@ -123,6 +129,10 @@ export class SimpleSynth {
     const mixChanged = params.oscLevels.some(
       (level, osc) => level !== previous.oscLevels[osc],
     );
+    const fmChanged =
+      params.fmEnabled !== previous.fmEnabled
+      || params.fmAlgorithm !== previous.fmAlgorithm
+      || params.fmFeedback !== previous.fmFeedback;
     const filterChanged =
       params.filterInitial !== previous.filterInitial
       || params.filterFinal !== previous.filterFinal
@@ -150,8 +160,8 @@ export class SimpleSynth {
     }
 
     for (const voice of this.voices.values()) {
-      if (mixChanged) {
-        this.applyMixLevels(voice);
+      if (mixChanged || fmChanged || pitchChangedFlags.some(Boolean)) {
+        this.applyOscRouting(voice);
       }
       if (this.context) {
         const when = this.context.currentTime;
@@ -180,6 +190,16 @@ export class SimpleSynth {
       if (randomChanged) {
         this.applyRandomMod(voice);
       }
+    }
+
+    if (
+      mixChanged
+      || fmChanged
+      || filterChanged
+      || pitchChangedFlags.some(Boolean)
+      || configChanged.some(Boolean)
+    ) {
+      this.notifyPreviewChange();
     }
   }
 
@@ -577,17 +597,28 @@ export class SimpleSynth {
         const oscillator = context.createOscillator();
         this.configureOscillator(oscillator, osc as OscId, context);
         oscillator.frequency.setValueAtTime(oscFrequency, now);
-        this.schedulePitchContour(oscillator, oscFrequency, now);
+        this.schedulePitchContour(
+          oscillator.frequency,
+          oscFrequency,
+          now,
+        );
 
         const oscGain = context.createGain();
         oscillator.connect(oscGain);
-        oscGain.connect(mixGain);
         vibratoGain.connect(oscillator.frequency);
         randomGain.connect(oscillator.frequency);
 
         oscillators.push(oscillator);
         oscGains.push(oscGain);
       }
+
+      const fmModGains: GainNode[][] = Array.from({ length: OSC_COUNT }, () =>
+        Array.from({ length: OSC_COUNT }, () => context.createGain()),
+      );
+      const fmFeedbackDelay = context.createDelay(0.05);
+      fmFeedbackDelay.delayTime.value = 1 / context.sampleRate;
+      const fmFeedbackGain = context.createGain();
+      fmFeedbackGain.gain.value = 0;
 
       mixGain.connect(filter1);
       filter1.connect(filter2);
@@ -599,6 +630,9 @@ export class SimpleSynth {
       const voice: ActiveVoice = {
         oscillators,
         oscGains,
+        fmModGains,
+        fmFeedbackDelay,
+        fmFeedbackGain,
         mixGain,
         filter1,
         filter2,
@@ -617,7 +651,7 @@ export class SimpleSynth {
         return;
       }
 
-      this.applyMixLevels(voice);
+      this.applyOscRouting(voice);
       this.scheduleAttack(envelope, now);
       this.applyVibrato(voice);
       this.applyRandomMod(voice);
@@ -646,9 +680,10 @@ export class SimpleSynth {
     voice.randomGain.disconnect();
     voice.randomLfo.port.postMessage({ type: "stop" });
     voice.randomLfo.disconnect();
-    for (let osc = 0; osc < OSC_COUNT; osc += 1) {
+    this.clearOscRouting(voice);
+    for (let osc = 0; osc < voice.oscillators.length; osc += 1) {
       voice.oscillators[osc].disconnect();
-      voice.oscGains[osc].disconnect();
+      voice.oscGains[osc]?.disconnect();
     }
     voice.mixGain.disconnect();
     voice.filter1.disconnect();
@@ -696,9 +731,71 @@ export class SimpleSynth {
     envelope.gain.linearRampToValueAtTime(sustain, decayTime);
   }
 
-  private applyMixLevels(voice: ActiveVoice): void {
+  /** Additive mix, or DX9-style FM using the same OscillatorNodes. */
+  private applyOscRouting(voice: ActiveVoice): void {
+    this.clearOscRouting(voice);
+
     for (let osc = 0; osc < OSC_COUNT; osc += 1) {
       voice.oscGains[osc].gain.value = this.params.oscLevels[osc];
+    }
+
+    if (!this.params.fmEnabled) {
+      for (let osc = 0; osc < OSC_COUNT; osc += 1) {
+        voice.oscGains[osc].connect(voice.mixGain);
+      }
+      return;
+    }
+
+    const algorithm = getFmAlgorithm(this.params.fmAlgorithm);
+    const carriers = new Set(algorithm.carriers);
+    const depthHz = Math.max(20, voice.baseFrequency) * FM_MOD_DEPTH_RATIO;
+
+    for (const osc of carriers) {
+      voice.oscGains[osc].connect(voice.mixGain);
+    }
+
+    for (const { src, dest } of algorithm.edges) {
+      const modGain = voice.fmModGains[dest][src];
+      modGain.gain.value = depthHz;
+      voice.oscGains[src].connect(modGain);
+      modGain.connect(voice.oscillators[dest].frequency);
+    }
+
+    if (this.params.fmFeedback > 0) {
+      const fb = algorithm.feedbackOp;
+      voice.fmFeedbackGain.gain.value = depthHz * this.params.fmFeedback;
+      voice.oscGains[fb].connect(voice.fmFeedbackDelay);
+      voice.fmFeedbackDelay.connect(voice.fmFeedbackGain);
+      voice.fmFeedbackGain.connect(voice.oscillators[fb].frequency);
+    }
+  }
+
+  private clearOscRouting(voice: ActiveVoice): void {
+    for (const gain of voice.oscGains) {
+      try {
+        gain.disconnect();
+      } catch {
+        // already disconnected
+      }
+    }
+    for (const row of voice.fmModGains) {
+      for (const gain of row) {
+        try {
+          gain.disconnect();
+        } catch {
+          // already disconnected
+        }
+      }
+    }
+    try {
+      voice.fmFeedbackDelay.disconnect();
+    } catch {
+      // already disconnected
+    }
+    try {
+      voice.fmFeedbackGain.disconnect();
+    } catch {
+      // already disconnected
     }
   }
 
@@ -739,7 +836,7 @@ export class SimpleSynth {
   }
 
   private schedulePitchContour(
-    oscillator: OscillatorNode,
+    frequency: AudioParam,
     baseFrequency: number,
     when: number,
   ): void {
@@ -754,14 +851,14 @@ export class SimpleSynth {
     const safeBase = Math.max(baseFrequency, 20);
     const safePeak = Math.max(peak, 20);
 
-    oscillator.frequency.cancelScheduledValues(when);
-    oscillator.frequency.setValueAtTime(safePeak, when);
+    frequency.cancelScheduledValues(when);
+    frequency.setValueAtTime(safePeak, when);
     if (decay <= 0) {
-      oscillator.frequency.setValueAtTime(safeBase, when);
+      frequency.setValueAtTime(safeBase, when);
       return;
     }
 
-    oscillator.frequency.exponentialRampToValueAtTime(safeBase, when + decay);
+    frequency.exponentialRampToValueAtTime(safeBase, when + decay);
   }
 
   private applyVibrato(voice: ActiveVoice): void {

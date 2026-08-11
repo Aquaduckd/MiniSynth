@@ -54,9 +54,9 @@ const OPTION_BUTTON_BASE_CLASS =
 const OPTION_BUTTON_INACTIVE_CLASS =
   "w-16 rounded-md border border-slate-700 bg-slate-900/60 px-2 py-1 text-[11px] font-medium text-slate-400 transition-colors hover:border-slate-600 hover:text-slate-200";
 const TAB_BUTTON_BASE_CLASS =
-  "inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors";
+  "inline-flex h-7 box-border items-center gap-1.5 rounded-md border px-2 text-[11px] font-medium transition-colors";
 const TAB_BUTTON_INACTIVE_CLASS =
-  "inline-flex items-center gap-1.5 rounded-md border border-slate-700 bg-slate-900/60 px-2 py-0.5 text-[11px] font-medium text-slate-400 transition-colors hover:border-slate-600 hover:text-slate-200";
+  "inline-flex h-7 box-border items-center gap-1.5 rounded-md border border-slate-700 bg-slate-900/60 px-2 text-[11px] font-medium text-slate-400 transition-colors hover:border-slate-600 hover:text-slate-200";
 const ACTIVE_DOT_CLASS = "h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400";
 const INACTIVE_DOT_CLASS = "h-1.5 w-1.5 shrink-0 rounded-full bg-slate-600";
 

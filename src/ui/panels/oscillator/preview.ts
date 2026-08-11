@@ -64,7 +64,7 @@ export function drawOscillatorPreview(
 
   ctx.fillStyle = "#64748b";
   ctx.font = "500 10px system-ui, sans-serif";
-  ctx.fillText(`Osc ${osc + 1}`, pad.left, 12);
+  ctx.fillText("ABCD"[osc] ?? String(osc + 1), pad.left, 12);
   ctx.fillStyle = theme.accent;
   ctx.fillText(oscWaveformLabel(waveform), pad.left + 48, 12);
   ctx.fillStyle = "#475569";

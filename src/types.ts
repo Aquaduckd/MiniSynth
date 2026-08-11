@@ -1,16 +1,26 @@
 export type OscWaveform = "pulse" | "saw" | "triangle" | "sine";
-export type OscId = 0 | 1 | 2;
+export type OscId = 0 | 1 | 2 | 3;
+export type FmAlgorithmId = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
 export type VibratoWaveform = "triangle" | "square";
 export type RandomMode = "noise" | "perlin";
 
-export type OscWaveformTuple = [OscWaveform, OscWaveform, OscWaveform];
-export type OscNumberTuple = [number, number, number];
+export type OscWaveformTuple = [
+  OscWaveform,
+  OscWaveform,
+  OscWaveform,
+  OscWaveform,
+];
+export type OscNumberTuple = [number, number, number, number];
 
 export interface SynthParams {
   oscWaveforms: OscWaveformTuple;
   oscLevels: OscNumberTuple;
   oscPitches: OscNumberTuple;
   oscPulseWidths: OscNumberTuple;
+  fmEnabled: boolean;
+  fmAlgorithm: FmAlgorithmId;
+  /** 0–1 self-feedback amount on the algorithm's feedback operator. */
+  fmFeedback: number;
   attack: number;
   decay: number;
   sustain: number;
@@ -56,6 +66,10 @@ export interface KeyLayout {
 export interface ActiveVoice {
   oscillators: OscillatorNode[];
   oscGains: GainNode[];
+  /** fmModGains[dest][src] — scales src into dest.frequency when FM edge is live. */
+  fmModGains: GainNode[][];
+  fmFeedbackDelay: DelayNode;
+  fmFeedbackGain: GainNode;
   mixGain: GainNode;
   filter1: BiquadFilterNode;
   filter2: BiquadFilterNode;

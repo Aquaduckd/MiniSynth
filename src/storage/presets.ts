@@ -3,9 +3,11 @@ import {
   cloneParams,
   DEFAULT_EFFECTS,
   DEFAULT_PARAMS,
+  OSC_COUNT,
 } from "../constants.js";
 import type {
   EffectsParams,
+  FmAlgorithmId,
   OscNumberTuple,
   OscWaveform,
   OscWaveformTuple,
@@ -14,6 +16,7 @@ import type {
   SynthPreset,
   VibratoWaveform,
 } from "../types.js";
+import { isFmAlgorithmId } from "../audio/fmAlgorithms.js";
 
 const PRESET_STORAGE_KEY = "minisynth.presets.v1";
 
@@ -131,20 +134,32 @@ export function normalizeStoredPreset(entry: unknown): SynthPreset | null {
 
   const params = cloneParams({
     ...DEFAULT_PARAMS,
-    oscWaveforms: [0, 1, 2].map((index) =>
+    oscWaveforms: Array.from({ length: OSC_COUNT }, (_, index) =>
       isOscWaveform(waveforms[index])
         ? waveforms[index]
         : DEFAULT_PARAMS.oscWaveforms[index],
     ) as OscWaveformTuple,
-    oscLevels: [0, 1, 2].map((index) =>
+    oscLevels: Array.from({ length: OSC_COUNT }, (_, index) =>
       normalizeNumber(levels[index], DEFAULT_PARAMS.oscLevels[index], 0, 1),
     ) as OscNumberTuple,
-    oscPitches: [0, 1, 2].map((index) =>
+    oscPitches: Array.from({ length: OSC_COUNT }, (_, index) =>
       normalizeNumber(pitches[index], DEFAULT_PARAMS.oscPitches[index], 0, 1),
     ) as OscNumberTuple,
-    oscPulseWidths: [0, 1, 2].map((index) =>
+    oscPulseWidths: Array.from({ length: OSC_COUNT }, (_, index) =>
       normalizeNumber(widths[index], DEFAULT_PARAMS.oscPulseWidths[index], 0, 1),
     ) as OscNumberTuple,
+    fmEnabled: Boolean(rawParams.fmEnabled),
+    fmAlgorithm: (
+      isFmAlgorithmId(rawParams.fmAlgorithm)
+        ? rawParams.fmAlgorithm
+        : DEFAULT_PARAMS.fmAlgorithm
+    ) as FmAlgorithmId,
+    fmFeedback: normalizeNumber(
+      rawParams.fmFeedback,
+      DEFAULT_PARAMS.fmFeedback,
+      0,
+      1,
+    ),
     attack: normalizeNumber(rawParams.attack, DEFAULT_PARAMS.attack, 0, 2),
     decay: normalizeNumber(rawParams.decay, DEFAULT_PARAMS.decay, 0, 2),
     sustain: normalizeNumber(rawParams.sustain, DEFAULT_PARAMS.sustain, 0, 1),

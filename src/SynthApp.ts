@@ -338,7 +338,7 @@ export class SynthApp {
     this.params = cloneParams(preset.params);
     this.effectsParams = cloneEffects(preset.effects);
     this.synth.setParams(this.params);
-    this.synth.setEffectsParams(this.effectsParams);
+        this.synth.setEffectsParams(this.effectsParams);
     this.panels.syncControlsFromState();
   }
 }

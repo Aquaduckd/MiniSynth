@@ -21,7 +21,7 @@ export const MAX_CUTOFF_HZ = 20000;
 export const MIN_FILTER_Q = 0.5;
 export const MAX_FILTER_Q = 4;
 
-export const OSC_COUNT = 3;
+export const OSC_COUNT = 4;
 
 export const MASTER_GAIN = 0.7;
 
@@ -64,10 +64,13 @@ export function cloneParams(params: SynthParams): SynthParams {
 }
 
 export const DEFAULT_PARAMS: SynthParams = {
-  oscWaveforms: ["pulse", "triangle", "saw"],
-  oscLevels: [1, 0, 0],
-  oscPitches: [0.5, 0.5, 0.5],
-  oscPulseWidths: [1, 1, 1],
+  oscWaveforms: ["pulse", "triangle", "saw", "sine"],
+  oscLevels: [1, 0, 0, 0],
+  oscPitches: [0.5, 0.5, 0.5, 0.5],
+  oscPulseWidths: [1, 1, 1, 1],
+  fmEnabled: false,
+  fmAlgorithm: 1,
+  fmFeedback: 0,
   attack: 0.01,
   decay: 0.12,
   sustain: 0.55,

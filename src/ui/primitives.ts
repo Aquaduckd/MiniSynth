@@ -98,7 +98,7 @@ export function createTabButton(label: string): {
   button.type = "button";
   button.setAttribute("role", "tab");
   button.className =
-    "inline-flex items-center gap-1.5 rounded-md border border-slate-700 bg-slate-900/60 px-2 py-0.5 text-[11px] font-medium text-slate-400 transition-colors hover:border-slate-600 hover:text-slate-200";
+    "inline-flex h-7 box-border items-center gap-1.5 rounded-md border border-slate-700 bg-slate-900/60 px-2 text-[11px] font-medium text-slate-400 transition-colors hover:border-slate-600 hover:text-slate-200";
 
   const dot = document.createElement("span");
   dot.className = "h-1.5 w-1.5 shrink-0 rounded-full bg-slate-600";

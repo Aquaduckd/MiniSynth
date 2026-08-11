@@ -9,6 +9,10 @@ import {
 } from "../constants.js";
 import type { SynthParams } from "../types.js";
 import {
+  FM_MOD_DEPTH_RATIO,
+  getFmAlgorithm,
+} from "./fmAlgorithms.js";
+import {
   clampRandomRate,
   cutoffHz,
   filterQ,
@@ -31,6 +35,68 @@ function mixedOscAtTime(
       * params.oscLevels[osc];
   }
   return mix;
+}
+
+/**
+ * Offline linear-FM approximation of the Web Audio routing:
+ * same osc waveforms/levels, modulators add Hz into carrier instantaneous frequency.
+ */
+function renderFmPreviewBuffer(
+  params: SynthParams,
+  baseFrequency: number,
+  sampleRate: number,
+  sampleCount: number,
+): Float32Array {
+  const algorithm = getFmAlgorithm(params.fmAlgorithm);
+  const carriers = new Set(algorithm.carriers);
+  const depthHz = Math.max(20, baseFrequency) * FM_MOD_DEPTH_RATIO;
+  const ratios = Array.from({ length: OSC_COUNT }, (_, op) =>
+    oscTunedFrequency(1, params.oscPitches[op]),
+  );
+  const phases = new Float64Array(OSC_COUNT);
+  const prev = new Float64Array(OSC_COUNT);
+  const next = new Float64Array(OSC_COUNT);
+  const buffer = new Float32Array(sampleCount);
+
+  // adjacency: dest <- list of src
+  const incoming: number[][] = Array.from({ length: OSC_COUNT }, () => []);
+  for (const { src, dest } of algorithm.edges) {
+    incoming[dest].push(src);
+  }
+
+  for (let index = 0; index < sampleCount; index += 1) {
+    let mix = 0;
+    for (let op = 0; op < OSC_COUNT; op += 1) {
+      let modHz = 0;
+      for (const src of incoming[op]) {
+        modHz += prev[src] * params.oscLevels[src] * depthHz;
+      }
+      if (
+        op === algorithm.feedbackOp
+        && params.fmFeedback > 0
+      ) {
+        modHz +=
+          prev[op] * params.oscLevels[op] * depthHz * params.fmFeedback;
+      }
+
+      const instantHz = Math.max(1, baseFrequency * ratios[op] + modHz);
+      phases[op] += instantHz / sampleRate;
+      phases[op] -= Math.floor(phases[op]);
+      const sample = oscSample(
+        phases[op],
+        params.oscWaveforms[op],
+        params.oscPulseWidths[op],
+      );
+      next[op] = sample;
+      if (carriers.has(op)) {
+        mix += sample * params.oscLevels[op];
+      }
+    }
+    prev.set(next);
+    buffer[index] = mix;
+  }
+
+  return buffer;
 }
 
 export interface BiquadCoeffs {
@@ -208,10 +274,23 @@ export function buildFilteredMasterWaveform(
   const buffer = new Float32Array(internalLength);
 
   for (const voice of voices) {
-    const voiceBuffer = new Float32Array(internalLength);
-    for (let index = 0; index < internalLength; index += 1) {
-      const time = index / MASTER_PREVIEW_SAMPLE_RATE;
-      voiceBuffer[index] = mixedOscAtTime(time, params, voice.baseFrequency);
+    let voiceBuffer: Float32Array;
+    if (params.fmEnabled) {
+      voiceBuffer = renderFmPreviewBuffer(
+        params,
+        voice.baseFrequency,
+        MASTER_PREVIEW_SAMPLE_RATE,
+        internalLength,
+      );
+    } else {
+      voiceBuffer = new Float32Array(internalLength);
+      for (let index = 0; index < internalLength; index += 1) {
+        voiceBuffer[index] = mixedOscAtTime(
+          index / MASTER_PREVIEW_SAMPLE_RATE,
+          params,
+          voice.baseFrequency,
+        );
+      }
     }
     applyDualLowpassSweepInPlace(
       voiceBuffer,

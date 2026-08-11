@@ -28,6 +28,7 @@ import {
   updateTabButtons,
 } from "../../panelHost.js";
 import { drawOscillatorPreview } from "./preview.js";
+import { FmConfigModal } from "./FmConfigModal.js";
 import {
   CANVAS_PREVIEW_CLASS,
   createEffectFooter,
@@ -44,19 +45,38 @@ export class OscillatorPanel implements Panel {
 
   private canvasEl: HTMLCanvasElement | null = null;
   private activeTabId: OscId = 0;
+  private configButton: HTMLButtonElement | null = null;
   private readonly tabButtons = new Map<OscId, HTMLButtonElement>();
   private readonly tabDots = new Map<OscId, HTMLElement>();
   private readonly tabPanels = new Map<OscId, HTMLElement>();
   private readonly waveformButtons: Array<Map<OscWaveform, HTMLButtonElement>> =
-    [new Map(), new Map(), new Map()];
+    Array.from({ length: OSC_COUNT }, () => new Map());
   private readonly widthKnobElements = new Map<OscId, HTMLElement>();
   private readonly paramKnobs = new Map<string, RotaryKnobHandle>();
   private readonly effectKnobs = new Map<
     keyof EffectsParams,
     RotaryKnobHandle
   >();
+  private readonly fmConfig: FmConfigModal;
 
-  constructor(private readonly host: PanelHost) {}
+  constructor(private readonly host: PanelHost) {
+    this.fmConfig = new FmConfigModal(
+      {
+        getParams: () => this.host.getParams(),
+        setParams: (params) => {
+          this.host.setParams(params);
+        },
+        applyParamsToSynth: (params) => {
+          this.host.applyParamsToSynth(params);
+        },
+        onVisualize: () => {
+          this.updateConfigButton();
+          this.host.onVisualize();
+        },
+      },
+      host.signal,
+    );
+  }
 
   mount(): HTMLElement {
     const panel = createLinkedPanel();
@@ -71,15 +91,18 @@ export class OscillatorPanel implements Panel {
     const title = document.createElement("div");
     title.className =
       "text-xs font-medium uppercase tracking-wide text-slate-400";
-    title.textContent = "Oscillator";
+    title.textContent = "OSC";
+
+    const headingRight = document.createElement("div");
+    headingRight.className = "flex items-center gap-1";
 
     const tabs = document.createElement("div");
     tabs.className = "flex items-center gap-1";
     tabs.setAttribute("role", "tablist");
-    tabs.setAttribute("aria-label", "Oscillator");
+    tabs.setAttribute("aria-label", "OSC");
 
     for (let osc = 0; osc < OSC_COUNT; osc += 1) {
-      const { button, dot } = createTabButton(`Osc ${osc + 1}`);
+      const { button, dot } = createTabButton("ABCD"[osc] ?? String(osc + 1));
       button.dataset.oscTab = String(osc);
       button.addEventListener(
         "click",
@@ -93,7 +116,23 @@ export class OscillatorPanel implements Panel {
       tabs.append(button);
     }
 
-    heading.append(title, tabs);
+    this.configButton = document.createElement("button");
+    this.configButton.type = "button";
+    this.configButton.className =
+      "inline-flex h-7 w-7 box-border items-center justify-center rounded-md border border-slate-700 text-slate-400 hover:border-slate-500 hover:text-slate-100";
+    this.configButton.setAttribute("aria-label", "OSC config");
+    this.configButton.title = "OSC config";
+    this.configButton.append(createGearIcon());
+    this.configButton.addEventListener(
+      "click",
+      () => {
+        this.fmConfig.open();
+      },
+      { signal: this.host.signal },
+    );
+
+    headingRight.append(tabs, this.configButton);
+    heading.append(title, headingRight);
 
     const body = document.createElement("div");
     body.className = "relative";
@@ -115,6 +154,7 @@ export class OscillatorPanel implements Panel {
 
     this.setActiveTab(this.activeTabId);
     this.updateActivityDots();
+    this.updateConfigButton();
     return panel;
   }
 
@@ -126,6 +166,8 @@ export class OscillatorPanel implements Panel {
     this.updateWaveformButtons();
     this.updateActivityDots();
     this.updateWidthKnobVisibility();
+    this.updateConfigButton();
+    this.fmConfig.syncFromState();
   }
 
   draw(_ctx: PanelDrawContext): void {
@@ -141,7 +183,9 @@ export class OscillatorPanel implements Panel {
   }
 
   dispose(): void {
+    this.fmConfig.dispose();
     this.canvasEl = null;
+    this.configButton = null;
     this.tabButtons.clear();
     this.tabDots.clear();
     this.tabPanels.clear();
@@ -151,6 +195,18 @@ export class OscillatorPanel implements Panel {
     this.widthKnobElements.clear();
     this.paramKnobs.clear();
     this.effectKnobs.clear();
+  }
+
+  private updateConfigButton(): void {
+    if (!this.configButton) {
+      return;
+    }
+
+    const enabled = this.host.getParams().fmEnabled;
+    this.configButton.classList.toggle("border-emerald-500", enabled);
+    this.configButton.classList.toggle("text-emerald-400", enabled);
+    this.configButton.classList.toggle("border-slate-700", !enabled);
+    this.configButton.classList.toggle("text-slate-400", !enabled);
   }
 
   private createTabPanel(osc: OscId): HTMLElement {
@@ -373,3 +429,22 @@ export class OscillatorPanel implements Panel {
     return knob.element;
   }
 }
+
+function createGearIcon(): SVGSVGElement {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("width", "14");
+  svg.setAttribute("height", "14");
+  svg.setAttribute("aria-hidden", "true");
+  svg.classList.add("block");
+
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("fill", "currentColor");
+  path.setAttribute(
+    "d",
+    "M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.06-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96a7.1 7.1 0 0 0-1.63-.94l-.36-2.54A.49.49 0 0 0 14 2h-4a.49.49 0 0 0-.48.41l-.36 2.54c-.59.24-1.13.55-1.63.94l-2.39-.96a.49.49 0 0 0-.59.22L2.63 8.87a.49.49 0 0 0 .12.61l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94L2.75 14.52a.49.49 0 0 0-.12.61l1.92 3.32c.13.22.4.31.64.22l2.39-.96c.5.39 1.04.7 1.63.94l.36 2.54c.05.23.25.41.48.41h4c.23 0 .43-.18.48-.41l.36-2.54c.59-.24 1.13-.55 1.63-.94l2.39.96c.24.09.51 0 .64-.22l1.92-3.32a.49.49 0 0 0-.12-.61l-2.03-1.58ZM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7Z",
+  );
+  svg.append(path);
+  return svg;
+}
+
