@@ -589,6 +589,8 @@ export class SimpleSynth {
       const randomGain = context.createGain();
       randomGain.gain.value = 0;
 
+      const pitchModScales: GainNode[] = [];
+
       for (let osc = 0; osc < OSC_COUNT; osc += 1) {
         const oscFrequency = oscTunedFrequency(
           baseFrequency,
@@ -605,11 +607,19 @@ export class SimpleSynth {
 
         const oscGain = context.createGain();
         oscillator.connect(oscGain);
-        vibratoGain.connect(oscillator.frequency);
-        randomGain.connect(oscillator.frequency);
+
+        const pitchModScale = context.createGain();
+        pitchModScale.gain.value = oscTunedFrequency(
+          1,
+          this.params.oscPitches[osc],
+        );
+        vibratoGain.connect(pitchModScale);
+        randomGain.connect(pitchModScale);
+        pitchModScale.connect(oscillator.frequency);
 
         oscillators.push(oscillator);
         oscGains.push(oscGain);
+        pitchModScales.push(pitchModScale);
       }
 
       const fmModGains: GainNode[][] = Array.from({ length: OSC_COUNT }, () =>
@@ -633,6 +643,7 @@ export class SimpleSynth {
         fmModGains,
         fmFeedbackDelay,
         fmFeedbackGain,
+        pitchModScales,
         mixGain,
         filter1,
         filter2,
@@ -680,6 +691,9 @@ export class SimpleSynth {
     voice.randomGain.disconnect();
     voice.randomLfo.port.postMessage({ type: "stop" });
     voice.randomLfo.disconnect();
+    for (const scale of voice.pitchModScales) {
+      scale.disconnect();
+    }
     this.clearOscRouting(voice);
     for (let osc = 0; osc < voice.oscillators.length; osc += 1) {
       voice.oscillators[osc].disconnect();
@@ -806,6 +820,10 @@ export class SimpleSynth {
     );
     voice.oscillators[osc].frequency.cancelScheduledValues(when);
     voice.oscillators[osc].frequency.setValueAtTime(Math.max(20, tuned), when);
+    voice.pitchModScales[osc].gain.setValueAtTime(
+      oscTunedFrequency(1, this.params.oscPitches[osc]),
+      when,
+    );
   }
 
   private applyFilterSettings(filter: BiquadFilterNode): void {

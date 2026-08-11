@@ -70,6 +70,11 @@ export interface ActiveVoice {
   fmModGains: GainNode[][];
   fmFeedbackDelay: DelayNode;
   fmFeedbackGain: GainNode;
+  /**
+   * Per-op scale for vibrato/random: master depth (Hz at ratio 1) × op ratio
+   * so pitch mod moves the whole voice together instead of absolute Hz per op.
+   */
+  pitchModScales: GainNode[];
   mixGain: GainNode;
   filter1: BiquadFilterNode;
   filter2: BiquadFilterNode;
